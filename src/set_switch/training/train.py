@@ -25,7 +25,12 @@ from set_switch.data.schema import SetSwitchExample
 from set_switch.data.setllm_collator import SetLLMCollator
 from set_switch.data.setllm_render import render_setllm_example
 from set_switch.modeling.load_model import dtype_from_name, load_tokenizer_and_model
-from set_switch.modeling.peft_setup import apply_trainable_parameter_policy, maybe_apply_lora
+from set_switch.modeling.peft_setup import (
+    apply_trainable_parameter_policy,
+    merged_special_token_state_dict,
+    maybe_apply_lora,
+    save_special_token_embeddings,
+)
 from set_switch.modeling.special_tokens import token_id_map
 from set_switch.training.eval_simple import evaluate_answer_ce
 from set_switch.utils.io import read_examples_jsonl, read_yaml
@@ -153,6 +158,24 @@ def infinite_dataloader(dataloader: DataLoader) -> Iterator[Any]:
             yield batch
         if not yielded:
             raise ValueError("Cannot train with an empty dataloader")
+
+
+def _save_training_checkpoint(
+    model: Any,
+    tokenizer: Any,
+    save_path: Path,
+    accelerator: Accelerator,
+) -> None:
+    unwrapped = accelerator.unwrap_model(model)
+    state_dict = merged_special_token_state_dict(unwrapped)
+    unwrapped.save_pretrained(
+        save_path,
+        save_function=accelerator.save,
+        state_dict=state_dict,
+    )
+    if accelerator.is_local_main_process:
+        save_special_token_embeddings(unwrapped, save_path)
+        tokenizer.save_pretrained(save_path)
 
 
 def train_from_config(cfg: dict[str, Any]) -> None:
@@ -295,19 +318,15 @@ def train_from_config(cfg: dict[str, Any]) -> None:
 
         if save_every and (step + 1) % save_every == 0:
             accelerator.wait_for_everyone()
-            unwrapped = accelerator.unwrap_model(model)
             save_path = output_dir / f"step-{step + 1}"
-            unwrapped.save_pretrained(save_path, save_function=accelerator.save)
+            _save_training_checkpoint(model, tokenizer, save_path, accelerator)
             if accelerator.is_local_main_process:
-                tokenizer.save_pretrained(save_path)
                 metric_logger.log(event="save", step=step + 1, path=str(save_path))
 
     accelerator.wait_for_everyone()
-    unwrapped = accelerator.unwrap_model(model)
     final_path = output_dir / "final"
-    unwrapped.save_pretrained(final_path, save_function=accelerator.save)
+    _save_training_checkpoint(model, tokenizer, final_path, accelerator)
     if accelerator.is_local_main_process:
-        tokenizer.save_pretrained(final_path)
         metric_logger.log(event="save_final", step=max_steps, path=str(final_path))
 
 

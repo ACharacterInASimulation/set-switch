@@ -25,6 +25,7 @@ from set_switch.data.schema import SetSwitchExample
 from set_switch.data.setllm_render import render_setllm_example
 from set_switch.modeling.attention_mask import build_setswitch_attention_mask
 from set_switch.modeling.load_model import load_tokenizer_and_model
+from set_switch.modeling.peft_setup import load_special_token_embeddings
 from set_switch.modeling.setllm import build_setllm_attention_mask
 from set_switch.training.train import apply_interface_overrides, attention_mask_dtype_from_config
 from set_switch.utils.io import read_yaml
@@ -310,14 +311,20 @@ def load_eval_tokenizer_and_model(
         )
         from peft import PeftModel
 
-        return tokenizer, PeftModel.from_pretrained(model, checkpoint)
+        model = PeftModel.from_pretrained(model, checkpoint)
+        if interface == "setswitch":
+            model = load_special_token_embeddings(model, checkpoint)
+        return tokenizer, model
 
     if checkpoint:
         model_cfg["name_or_path"] = checkpoint
-    return load_tokenizer_and_model(
+    tokenizer, model = load_tokenizer_and_model(
         model_cfg,
         add_setswitch_tokens=interface == "setswitch",
     )
+    if checkpoint and interface == "setswitch":
+        model = load_special_token_embeddings(model, checkpoint)
+    return tokenizer, model
 
 
 def main() -> None:

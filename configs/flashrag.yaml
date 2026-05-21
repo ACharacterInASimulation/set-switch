@@ -32,12 +32,16 @@ method_overrides:
     model:
       # Custom 4D non-causal masks need eager attention for correctness.
       attn_implementation: eager
-      use_lora: false
+      use_lora: true
       trainable: setswitch_tokens
+      lora_r: 8
+      lora_alpha: 1
+      lora_dropout: 0.0
+      lora_target_modules: all-linear
     train:
-      # Token-only SetSwitch is closest to soft-prompt/special-token tuning;
-      # the tiny trainable parameter count needs a larger LR than LoRA.
-      learning_rate: 0.003
+      # Fair primary comparison: SetSwitch special tokens plus the same LoRA
+      # budget used by the SetLLM baseline.
+      learning_rate: 0.0003
   setllm:
     run_name: qwen3_4b_setllm_lora
     model:

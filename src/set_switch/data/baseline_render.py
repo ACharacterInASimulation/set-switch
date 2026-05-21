@@ -77,13 +77,20 @@ def render_baseline_prompt_text(
 def _chat_prefix_ids(tokenizer: Any, prompt: str) -> list[int]:
     messages = [{"role": "user", "content": prompt}]
     if hasattr(tokenizer, "apply_chat_template") and getattr(tokenizer, "chat_template", None):
-        return list(
-            tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-            )
+        encoded = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
         )
+        if isinstance(encoded, dict):
+            encoded = encoded["input_ids"]
+        elif hasattr(encoded, "input_ids"):
+            encoded = encoded.input_ids
+        if hasattr(encoded, "tolist"):
+            encoded = encoded.tolist()
+        if encoded and isinstance(encoded[0], list):
+            encoded = encoded[0]
+        return [int(token_id) for token_id in encoded]
     return _encode(tokenizer, prompt + "\n\nAnswer:")
 
 
