@@ -49,8 +49,8 @@ def main() -> None:
     )
     parser.add_argument("--prefix-tokens", type=int, default=128)
     parser.add_argument("--answer-tokens", type=int, default=64)
-    parser.add_argument("--item-overhead-tokens", type=int, default=6)
-    parser.add_argument("--set-overhead-tokens", type=int, default=4)
+    parser.add_argument("--item-overhead-tokens", type=int)
+    parser.add_argument("--set-overhead-tokens", type=int)
     args = parser.parse_args()
 
     cfg = read_yaml(args.config)
@@ -64,6 +64,13 @@ def main() -> None:
     max_doc_tokens = data_cfg.get("max_doc_tokens")
     if max_doc_tokens is None:
         max_doc_tokens = args.assumed_doc_tokens
+    compact_format = bool(data_cfg.get("compact_special_token_format", False))
+    item_overhead_tokens = args.item_overhead_tokens
+    if item_overhead_tokens is None:
+        item_overhead_tokens = 2 if compact_format else 6
+    set_overhead_tokens = args.set_overhead_tokens
+    if set_overhead_tokens is None:
+        set_overhead_tokens = 2 if compact_format else 4
     seq_len = estimate_tokens(
         max_docs=int(data_cfg.get("max_docs", 8)),
         max_doc_tokens=int(max_doc_tokens),
@@ -71,14 +78,17 @@ def main() -> None:
         num_gather_tokens=int(data_cfg.get("num_gather_tokens", 4)),
         prefix_tokens=args.prefix_tokens,
         answer_tokens=args.answer_tokens,
-        item_overhead_tokens=args.item_overhead_tokens,
-        set_overhead_tokens=args.set_overhead_tokens,
+        item_overhead_tokens=item_overhead_tokens,
+        set_overhead_tokens=set_overhead_tokens,
     )
     mask_gib = batch_size * seq_len * seq_len * dtype_bytes / 1024**3
 
     print(f"estimated_seq_len: {seq_len}")
     print(f"assumed_max_doc_tokens: {max_doc_tokens}")
     print(f"batch_size: {batch_size}")
+    print(f"compact_special_token_format: {compact_format}")
+    print(f"item_overhead_tokens: {item_overhead_tokens}")
+    print(f"set_overhead_tokens: {set_overhead_tokens}")
     print(f"mask_dtype_bytes: {dtype_bytes}")
     print(f"one_4d_attention_mask_gib: {mask_gib:.3f}")
     print()

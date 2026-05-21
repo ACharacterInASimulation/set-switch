@@ -114,6 +114,7 @@ data:
   doc_truncation: answer_window
   num_reads_per_doc: 2
   num_gather_tokens: 4
+  compact_special_token_format: true
   append_eos_token: true
   setllm_append_eos_token: true
   instruction: "Use the provided passages or options to answer the question. Treat the items as an unordered set."
