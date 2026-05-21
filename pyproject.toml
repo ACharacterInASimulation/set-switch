@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "set-switch"
+version = "0.1.0"
+description = "SetSwitch: token-triggered set reading for decoder-only language models"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch",
+  "transformers>=4.52.4",
+  "accelerate",
+  "datasets",
+  "peft",
+  "numpy",
+  "pandas",
+  "tqdm",
+  "pyyaml",
+  "rich",
+  "scikit-learn",
+  "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "ruff",
+  "black",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100

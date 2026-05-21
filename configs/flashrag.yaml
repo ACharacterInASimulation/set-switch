@@ -1,0 +1,144 @@
+project_name: set-switch
+run_name: qwen3_4b_setswitch
+seed: 42
+
+# choices: setswitch, chat_baseline, setllm
+# You can also override this at launch:
+#   accelerate launch scripts/train.py --config configs/flashrag.yaml --interface setllm
+model_interface: setswitch
+
+model:
+  name_or_path: Qwen/Qwen3-4B
+  dtype: bfloat16
+  attn_implementation: eager
+  use_lora: false
+
+method_overrides:
+  chat_baseline:
+    run_name: qwen3_4b_chat_baseline
+    model:
+      # The plain causal baseline can use PyTorch SDPA/Flash kernels.
+      attn_implementation: sdpa
+      use_lora: true
+      lora_r: 8
+      lora_alpha: 1
+      lora_dropout: 0.0
+      lora_target_modules: all-linear
+    train:
+      # LoRA/SetLLM literature commonly tunes around 3e-4 to 1e-3.
+      learning_rate: 0.0003
+  setswitch:
+    run_name: qwen3_4b_setswitch
+    model:
+      # Custom 4D non-causal masks need eager attention for correctness.
+      attn_implementation: eager
+      use_lora: false
+      trainable: setswitch_tokens
+    train:
+      # Token-only SetSwitch is closest to soft-prompt/special-token tuning;
+      # the tiny trainable parameter count needs a larger LR than LoRA.
+      learning_rate: 0.003
+  setllm:
+    run_name: qwen3_4b_setllm_lora
+    model:
+      # SetMask is also a custom 4D mask, so keep eager unless validated otherwise.
+      attn_implementation: eager
+      use_lora: true
+      lora_r: 8
+      lora_alpha: 1
+      lora_dropout: 0.0
+      lora_target_modules: all-linear
+    train:
+      learning_rate: 0.0003
+
+data:
+  source: flashrag
+  dataset_name: RUC-NLPIR/FlashRAG_datasets
+
+  # Final v0 task buckets:
+  #   normal_mcq:     commonsenseqa, openbookqa, arc, hellaswag, mmlu, quartz
+  #   rag_single_hop: msmarco-qa, squad, boolq
+  #   rag_multi_hop:  hotpotqa, 2wikimultihopqa, musique
+  #   aggregation:    ambig_qa
+  #
+  # You can use plain names:
+  datasets:
+    - commonsenseqa
+    - openbookqa
+    - arc
+    - hellaswag
+    - mmlu
+    - quartz
+    - msmarco-qa
+    - squad
+    - boolq
+    - hotpotqa
+    - 2wikimultihopqa
+    - musique
+    - ambig_qa
+  #
+  # Compact percentage syntax is also supported. hotpotqa[:0.5] means 50% of
+  # the selected split, while mmlu[dev:10%] means 10% of MMLU dev.
+  # datasets: ["hotpotqa[:0.5]", "2wiki[:50%]", "msmarco[:0.01]"]
+  #
+  # Or per-dataset controls:
+  # datasets:
+  #   - name: hotpotqa
+  #     split: train
+  #     max_examples: 5000
+  #   - name: msmarco-qa
+  #     split: train
+  #     percent: 0.01
+
+  # If set, examples are allocated by sample_allocation unless a dataset entry has
+  # max_examples. Small datasets naturally cap at their available train/dev size.
+  total_train_examples: 40000
+  total_val_examples: 1000
+  # Task-balanced first, then source-balanced within each task. This prevents
+  # MS MARCO or any other large source from dominating the first comparison.
+  sample_allocation: task_balanced_equal
+
+  # SetSwitch/SetLLM structurally support more docs, but custom eager 4D masks
+  # scale as O(sequence_length^2). Use scripts/estimate_context.py before
+  # pushing max_docs/max_doc_tokens higher.
+  max_docs: 20
+  # Keep full converted documents by default. Set this to an integer, e.g. 512,
+  # only for memory-controlled runs.
+  max_doc_tokens:
+  # If max_doc_tokens is set, gold/support documents keep a token window around
+  # an answer mention when it appears; otherwise they fall back to head truncation.
+  doc_truncation: answer_window
+  num_reads_per_doc: 2
+  num_gather_tokens: 4
+  append_eos_token: true
+  setllm_append_eos_token: true
+  instruction: "Use the provided passages or options to answer the question. Treat the items as an unordered set."
+
+mask:
+  doc_attention: doc_causal
+  answer_attends_raw_docs: false
+  answer_attends_reads: false
+
+train:
+  max_steps: 5000
+  batch_size: 1
+  grad_accum_steps: 8
+  # Fallback only. Method overrides above set the active LR for each interface.
+  learning_rate: 0.0001
+  warmup_steps: 100
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  mixed_precision: bf16
+  local_logging: true
+  metrics_file: metrics.jsonl
+  log_every: 10
+  eval_every: 200
+  save_every: 1000
+
+eval:
+  # Most selected FlashRAG sources expose dev labels; only some expose test labels.
+  split: dev
+  max_examples: 1000
+  max_new_tokens: 32
+  gold_positions: [0.0, 0.25, 0.5, 0.75, 1.0]
+  output: outputs/{run_name}_{interface}_{split}_eval.json
