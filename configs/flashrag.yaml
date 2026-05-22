@@ -69,31 +69,47 @@ data:
 
   # Final v0 task buckets:
   #   normal_mcq:     commonsenseqa, openbookqa, arc, hellaswag, mmlu, quartz
+  #   multihop_mcq:   qasc
   #   rag_single_hop: msmarco-qa, squad, boolq
   #   rag_multi_hop:  hotpotqa, 2wikimultihopqa, musique
   #   aggregation:    ambig_qa
   #
-  # You can use plain names:
+  # Training mix for 100k examples:
+  #   normal_mcq:      9k total, kept deliberately small as a control bucket
+  #   multihop_mcq:    6k total
+  #   rag_single_hop: 27k total
+  #   rag_multi_hop:  50k total, emphasized for the main claim
+  #   aggregation:    8k total
+  # These are train-only limits; dev/eval still use total_val_examples below.
   datasets:
-    - commonsenseqa
-    - openbookqa
-    - arc
-    - hellaswag
-    - mmlu
-    - quartz
-    - msmarco-qa
-    - squad
-    - boolq
-    # Hard multihop sources are intentionally overrepresented in train only,
-    # because this is the main claim surface for SetSwitch. Dev/eval still use
-    # total_val_examples and task-balanced allocation.
+    - name: commonsenseqa
+      train_max_examples: 1500
+    - name: openbookqa
+      train_max_examples: 1500
+    - name: arc
+      train_max_examples: 1500
+    - name: hellaswag
+      train_max_examples: 1500
+    - name: mmlu
+      train_max_examples: 1500
+    - name: quartz
+      train_max_examples: 1500
+    - name: qasc
+      train_max_examples: 6000
+    - name: msmarco-qa
+      train_max_examples: 10500
+    - name: squad
+      train_max_examples: 10500
+    - name: boolq
+      train_max_examples: 6000
     - name: hotpotqa
-      train_max_examples: 6000
+      train_max_examples: 20000
     - name: 2wikimultihopqa
-      train_max_examples: 6000
+      train_max_examples: 15000
     - name: musique
-      train_max_examples: 6000
-    - ambig_qa
+      train_max_examples: 15000
+    - name: ambig_qa
+      train_max_examples: 8000
   #
   # Compact percentage syntax is also supported. hotpotqa[:0.5] means 50% of
   # the selected split, while mmlu[dev:10%] means 10% of MMLU dev.
@@ -110,7 +126,7 @@ data:
 
   # If set, examples are allocated by sample_allocation unless a dataset entry has
   # max_examples. Small datasets naturally cap at their available train/dev size.
-  total_train_examples: 40000
+  total_train_examples: 100000
   total_val_examples: 1000
   # Task-balanced first, then source-balanced within each task. This prevents
   # MS MARCO or any other large source from dominating the first comparison.

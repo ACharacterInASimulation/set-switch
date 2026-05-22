@@ -24,7 +24,13 @@ def maybe_apply_lora(model: Any, model_cfg: dict[str, Any]) -> Any:
     if not model_cfg.get("use_lora", False):
         return model
 
-    from peft import LoraConfig, TaskType, get_peft_model
+    try:
+        from peft import LoraConfig, TaskType, get_peft_model
+    except Exception as exc:
+        raise ImportError(
+            "LoRA is enabled, but PEFT could not be imported. Install a compatible "
+            "transformers/peft pair, for example from this project's pyproject constraints."
+        ) from exc
 
     target_modules = model_cfg.get("lora_target_modules", "all-linear")
     if isinstance(target_modules, tuple):

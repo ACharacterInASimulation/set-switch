@@ -123,6 +123,8 @@ def _primary_metric_for_example(example: SetSwitchExample) -> str:
     source = example.source.removeprefix("flashrag_")
     if example.metadata.get("set_type") == "options" or task_group_for_source(source) == "normal_mcq":
         return "accuracy"
+    if source == "qasc":
+        return "accuracy"
     if source == "boolq":
         return "accuracy"
     if source == "msmarco-qa":
@@ -203,6 +205,12 @@ def _summarize_counts(counts: dict[str, dict[str, float]]) -> dict[str, dict[str
         }
         for key, value in sorted(counts.items())
     }
+
+
+def gold_position_sweep_enabled(interface: str) -> bool:
+    """Only the ordinary causal baseline needs an explicit gold-position sweep."""
+
+    return interface == "chat_baseline"
 
 
 def place_gold_documents(example: SetSwitchExample, fraction: float) -> SetSwitchExample:
@@ -455,7 +463,13 @@ def load_eval_tokenizer_and_model(
             model_cfg,
             add_setswitch_tokens=interface == "setswitch",
         )
-        from peft import PeftModel
+        try:
+            from peft import PeftModel
+        except Exception as exc:
+            raise ImportError(
+                "This checkpoint is a PEFT adapter, but PEFT could not be imported. "
+                "Install a compatible transformers/peft pair before evaluation."
+            ) from exc
 
         model = PeftModel.from_pretrained(model, checkpoint)
         if interface == "setswitch":
@@ -515,18 +529,38 @@ def main() -> None:
     model.eval()
 
     examples = _load_eval_examples(cfg, split, max_examples)
+    sweep_gold_positions = gold_position_sweep_enabled(interface)
     task_counts: dict[str, dict[str, float]] = defaultdict(_empty_count)
     source_counts: dict[str, dict[str, float]] = defaultdict(_empty_count)
     overall_counts: dict[str, dict[str, float]] = defaultdict(_empty_count)
     rows = []
 
     for example in examples:
-        task = example.metadata.get("task_group") or task_group_for_source(example.source)
+        task = (
+            example.metadata.get("eval_task_group")
+            or example.metadata.get("task_group")
+            or task_group_for_source(example.source)
+        )
         source = example.source.removeprefix("flashrag_")
         sweep_status = gold_sweep_status(example)
-        for fraction in gold_positions:
-            placed = place_gold_documents(example, fraction)
-            rendered = _render(interface, placed, tokenizer, cfg)
+        scored_predictions: list[tuple[float, float | None, str, dict[str, Any]]] = []
+        if sweep_gold_positions:
+            for fraction in gold_positions:
+                placed = place_gold_documents(example, fraction)
+                rendered = _render(interface, placed, tokenizer, cfg)
+                prediction = generate_prediction(
+                    interface=interface,
+                    model=model,
+                    tokenizer=tokenizer,
+                    rendered=rendered,
+                    cfg=cfg,
+                    max_new_tokens=max_new_tokens,
+                )
+                scored_predictions.append(
+                    (fraction, fraction, prediction, score_prediction(example, prediction))
+                )
+        else:
+            rendered = _render(interface, example, tokenizer, cfg)
             prediction = generate_prediction(
                 interface=interface,
                 model=model,
@@ -536,6 +570,11 @@ def main() -> None:
                 max_new_tokens=max_new_tokens,
             )
             score = score_prediction(example, prediction)
+            scored_predictions = [
+                (fraction, None, prediction, score) for fraction in gold_positions
+            ]
+
+        for fraction, effective_fraction, prediction, score in scored_predictions:
             _update_count(task_counts, f"{task}@{fraction:g}", score, sweep_status)
             _update_count(source_counts, f"{source}@{fraction:g}", score, sweep_status)
             _update_count(overall_counts, f"overall@{fraction:g}", score, sweep_status)
@@ -546,6 +585,8 @@ def main() -> None:
                     "source_config": source,
                     "task_group": task,
                     "gold_position": fraction,
+                    "effective_gold_position": effective_fraction,
+                    "gold_position_swept": sweep_gold_positions,
                     "prediction": prediction,
                     "answers": _answers(example),
                     **score,
@@ -561,6 +602,7 @@ def main() -> None:
         "split": split,
         "max_examples": max_examples,
         "gold_positions": gold_positions,
+        "gold_position_sweep": sweep_gold_positions,
         "metric_policy": METRIC_POLICY,
         "summary": summary,
         "task_summary": summary,

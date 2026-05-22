@@ -143,6 +143,47 @@ def test_padding_is_never_attended():
     assert not allowed[-1, :-1].any()
 
 
+def test_batched_padding_rows_have_finite_self_attention():
+    role_ids, item_ids, read_slots, gather_slots = _toy_roles()
+    padded_role_ids = [
+        role_ids + [ROLE_PREFIX],
+        role_ids + [ROLE_ANSWER],
+    ]
+    padded_item_ids = [
+        item_ids + [-1],
+        item_ids + [-1],
+    ]
+    padded_read_slots = [
+        read_slots + [-1],
+        read_slots + [-1],
+    ]
+    padded_gather_slots = [
+        gather_slots + [-1],
+        gather_slots + [-1],
+    ]
+    pad_mask = [
+        [True] * len(role_ids) + [False],
+        [True] * (len(role_ids) + 1),
+    ]
+
+    mask = build_setswitch_attention_mask(
+        padded_role_ids,
+        padded_item_ids,
+        padded_read_slots,
+        padded_gather_slots,
+        attention_mode=DOC_CAUSAL,
+        pad_mask=pad_mask,
+        dtype=torch.bfloat16,
+    )
+    allowed = mask[:, 0] == 0
+
+    assert torch.isfinite(mask).all()
+    assert allowed.any(dim=-1).all()
+    assert allowed[0, -1, -1]
+    assert not allowed[0, -1, :-1].any()
+    assert not allowed[0, :-1, -1].any()
+
+
 def test_custom_mask_dtype_is_configurable():
     role_ids, item_ids, read_slots, gather_slots = _toy_roles()
     mask = build_setswitch_attention_mask(

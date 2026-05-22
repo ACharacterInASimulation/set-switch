@@ -4,6 +4,7 @@ from set_switch.data.dataset_suite import (
     FlashRAGSourceSelection,
     allocate_flashrag_source_limits,
     convert_flashrag_row,
+    convert_qasc_row,
     normalize_flashrag_sources,
     task_group_for_source,
 )
@@ -17,6 +18,7 @@ def test_flashrag_context_row_converts_to_documents():
         "question": "Which document has the answer?",
         "golden_answers": ["Document B"],
         "metadata": {
+            "type": "bridge",
             "supporting_facts": {"title": ["B"], "sent_id": [0]},
             "context": {
                 "title": ["A", "B"],
@@ -38,6 +40,65 @@ def test_flashrag_context_row_converts_to_documents():
     assert example.answer == "Document B"
     assert len(example.documents) == 2
     assert [doc.is_gold for doc in example.documents] == [False, True]
+    assert example.metadata["eval_task_group"] == "hotpotqa_bridge"
+
+
+def test_flashrag_multihop_subtype_metadata_is_reported():
+    row = {
+        "id": "2wiki_0",
+        "question": "Which entity is older?",
+        "golden_answers": ["Entity A"],
+        "metadata": {
+            "type": "bridge_comparison",
+            "supporting_facts": {"title": ["A", "B"], "sent_id": [0, 0]},
+            "context": {
+                "title": ["A", "B"],
+                "sentences": [["A was born in 1900."], ["B was born in 1910."]],
+            },
+        },
+    }
+
+    example = convert_flashrag_row(
+        row=row,
+        example_idx=0,
+        max_docs=8,
+        instruction="Use documents.",
+        config_name="2wikimultihopqa",
+    )
+
+    assert example is not None
+    assert example.metadata["question_type"] == "bridge_comparison"
+    assert example.metadata["eval_task_group"] == "2wikimultihopqa_bridge_comparison"
+
+
+def test_qasc_row_uses_two_facts_as_documents_and_options_in_question():
+    row = {
+        "id": "qasc_0",
+        "question": "What is formed by clouds?",
+        "choices": {"text": ["rain", "stone"], "label": ["A", "B"]},
+        "answerKey": "A",
+        "fact1": "Rain is formed by water vapor condensing.",
+        "fact2": "Clouds are made of water vapor.",
+        "combinedfact": "Rain can be formed by clouds.",
+    }
+
+    example = convert_qasc_row(
+        row=row,
+        example_idx=0,
+        max_docs=8,
+        instruction="Use documents.",
+    )
+
+    assert example is not None
+    assert example.source == "qasc"
+    assert example.answer == "rain"
+    assert "Options:\nA. rain\nB. stone" in example.question
+    assert [doc.text for doc in example.documents] == [
+        "Rain is formed by water vapor condensing.",
+        "Clouds are made of water vapor.",
+    ]
+    assert all(doc.is_gold for doc in example.documents)
+    assert example.metadata["eval_task_group"] == "qasc_2hop_mcq"
 
 
 def test_flashrag_msmarco_row_converts_passages():
@@ -268,6 +329,33 @@ def test_split_specific_flashrag_limits_only_affect_requested_split():
 
     assert train_selection[0].max_examples == 6000
     assert dev_selection[0].max_examples is None
+
+
+def test_test_split_selection_skips_sources_without_labeled_test_split():
+    selections = normalize_flashrag_sources(
+        {
+            "datasets": [
+                "commonsenseqa",
+                "openbookqa",
+                "arc",
+                "hellaswag",
+                "mmlu",
+                "quartz",
+                "qasc",
+                "hotpotqa",
+            ]
+        },
+        split="test",
+    )
+
+    assert [selection.name for selection in selections] == [
+        "openbookqa",
+        "arc",
+        "mmlu",
+        "quartz",
+        "qasc",
+    ]
+    assert all(selection.split == "test" for selection in selections)
 
 
 def test_task_balanced_equal_allocation_prevents_msmarco_domination():

@@ -14,6 +14,7 @@ from set_switch.constants import DEFAULT_INSTRUCTION
 from set_switch.data.schema import SetSwitchDocument, SetSwitchExample
 
 FLASHRAG_KNOWN_COUNTS: dict[str, dict[str, int]] = {
+    "qasc": {"train": 8_134, "validation": 926, "test": 920},
     "squad": {"train": 87_599, "dev": 10_570},
     "msmarco-qa": {"train": 808_731, "dev": 101_093},
     "ambig_qa": {"train": 10_036, "dev": 2_002},
@@ -29,6 +30,8 @@ FLASHRAG_KNOWN_COUNTS: dict[str, dict[str, int]] = {
     "quartz": {"train": 2_696, "dev": 384, "test": 784},
 }
 
+QASC_DATASET_NAME = "allenai/qasc"
+
 
 @dataclass(frozen=True)
 class DatasetSpec:
@@ -36,6 +39,7 @@ class DatasetSpec:
     train_split: str
     validation_split: str
     notes: str
+    test_split: str | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,7 @@ FLASHRAG_TASK_GROUPS: dict[str, str] = {
     "hellaswag": TASK_MCQ,
     "mmlu": TASK_MCQ,
     "quartz": TASK_MCQ,
+    "qasc": TASK_RAG_MULTI_HOP,
     "msmarco-qa": TASK_RAG_SINGLE_HOP,
     "squad": TASK_RAG_SINGLE_HOP,
     "boolq": TASK_RAG_SINGLE_HOP,
@@ -280,12 +285,88 @@ def convert_option_row(
     )
 
 
+def _letter_labels(count: int) -> list[str]:
+    return [chr(ord("A") + idx) for idx in range(count)]
+
+
+def convert_qasc_row(
+    row: dict[str, Any],
+    example_idx: int,
+    max_docs: int,
+    instruction: str,
+) -> SetSwitchExample | None:
+    question = _clean(row.get("question"))
+    choices = row.get("choices", {})
+    choice_texts = choices.get("text", []) if isinstance(choices, dict) else []
+    choice_labels = choices.get("label", []) if isinstance(choices, dict) else []
+    choice_texts = [_clean(choice) for choice in choice_texts if _clean(choice)]
+    if not choice_texts:
+        return None
+    if not choice_labels or len(choice_labels) != len(choice_texts):
+        choice_labels = _letter_labels(len(choice_texts))
+    choice_labels = [_clean(label) for label in choice_labels]
+    answer_key = _clean(row.get("answerKey"))
+    label_to_text = {
+        label_variant: text
+        for label, text in zip(choice_labels, choice_texts, strict=False)
+        for label_variant in {label, label.upper(), label.lower()}
+    }
+    answer = label_to_text.get(answer_key, "")
+    if not question or not answer:
+        return None
+
+    option_lines = [
+        f"{label}. {text}" for label, text in zip(choice_labels, choice_texts, strict=False)
+    ]
+    question_with_options = f"{question}\n\nOptions:\n" + "\n".join(option_lines)
+    facts = [_clean(row.get("fact1")), _clean(row.get("fact2"))]
+    documents = [
+        SetSwitchDocument(
+            doc_id=f"qasc-{example_idx}-fact-{fact_idx}",
+            text=fact,
+            is_gold=True,
+            metadata={"source_doc_index": fact_idx, "fact_role": f"fact{fact_idx + 1}"},
+        )
+        for fact_idx, fact in enumerate(facts[:max_docs])
+        if fact
+    ]
+    if not documents:
+        return None
+
+    return SetSwitchExample(
+        example_id=f"qasc-{row.get('id', example_idx)}",
+        instruction=instruction,
+        question=question_with_options,
+        documents=documents,
+        answer=answer,
+        source="qasc",
+        metadata={
+            "raw_id": row.get("id"),
+            "answer_key": answer_key,
+            "answer_choices": choice_texts,
+            "golden_answers": [answer],
+            "set_type": "documents",
+            "task_group": task_group_for_source("qasc"),
+            "eval_task_group": "qasc_2hop_mcq",
+            "num_hops": 2,
+            "context_policy": "fact1_fact2_no_combinedfact",
+        },
+    )
+
+
 DATASET_SPECS: dict[str, DatasetSpec] = {
     "hotpotqa": DatasetSpec(
         name="hotpotqa",
         train_split="train",
         validation_split="dev",
         notes="Wikipedia multi-hop QA with paragraph contexts and supporting facts.",
+    ),
+    "qasc": DatasetSpec(
+        name="qasc",
+        train_split="train",
+        validation_split="validation",
+        test_split="test",
+        notes="8-way science MCQ requiring composition of two supporting facts.",
     ),
     "2wikimultihopqa": DatasetSpec(
         name="2wikimultihopqa",
@@ -334,12 +415,14 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         train_split="train",
         validation_split="dev",
         notes="Science multiple choice; choices are unordered SetSwitch items.",
+        test_split="test",
     ),
     "arc": DatasetSpec(
         name="arc",
         train_split="train",
         validation_split="dev",
         notes="Science exam multiple choice; choices are unordered SetSwitch items.",
+        test_split="test",
     ),
     "hellaswag": DatasetSpec(
         name="hellaswag",
@@ -352,12 +435,14 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         train_split="train",
         validation_split="dev",
         notes="Knowledge multiple choice; choices are unordered SetSwitch items.",
+        test_split="test",
     ),
     "quartz": DatasetSpec(
         name="quartz",
         train_split="train",
         validation_split="dev",
         notes="Qualitative reasoning multiple choice; choices are unordered SetSwitch items.",
+        test_split="test",
     ),
 }
 
@@ -406,6 +491,7 @@ FLASHRAG_ALIASES = {
     "hellaswag": "hellaswag",
     "mmlu": "mmlu",
     "quartz": "quartz",
+    "qasc": "qasc",
 }
 
 
@@ -624,6 +710,16 @@ def convert_flashrag_row(
     if not documents:
         return None
 
+    question_type = _clean(metadata.get("type"))
+    num_hops = None
+    eval_task_group = None
+    if config_name in {"hotpotqa", "2wikimultihopqa"} and question_type:
+        eval_task_group = f"{config_name}_{question_type}"
+    if config_name == "musique":
+        num_hops = len(_sequence_to_records(metadata.get("question_decomposition", [])))
+        if num_hops > 0:
+            eval_task_group = f"musique_{num_hops}hop"
+
     example_metadata = {
         "flashrag_config": config_name,
         "raw_id": row.get("id"),
@@ -631,6 +727,12 @@ def convert_flashrag_row(
         "set_type": "documents",
         "task_group": task_group_for_source(config_name),
     }
+    if question_type:
+        example_metadata["question_type"] = question_type
+    if num_hops is not None:
+        example_metadata["num_hops"] = num_hops
+    if eval_task_group:
+        example_metadata["eval_task_group"] = eval_task_group
     if config_name == "musique":
         example_metadata["context_policy"] = "support_only_question_decomposition"
 
@@ -653,6 +755,7 @@ def task_group_for_source(source: str) -> str:
 
 
 def _split_for_source(source: str, requested_split: str) -> str:
+    source = _canonical_source_name(source)
     if requested_split not in {"train", "dev", "validation", "val", "test"}:
         return requested_split
     spec = DATASET_SPECS.get(source)
@@ -660,7 +763,19 @@ def _split_for_source(source: str, requested_split: str) -> str:
         return spec.train_split if spec else "train"
     if requested_split in {"dev", "validation", "val"}:
         return spec.validation_split if spec else "dev"
-    return "test"
+    if spec is None:
+        return "test"
+    if spec.test_split is None:
+        raise ValueError(f"FlashRAG source {source!r} does not expose a labeled test split")
+    return spec.test_split
+
+
+def _source_supports_requested_split(source: str, requested_split: str) -> bool:
+    source = _canonical_source_name(source)
+    if requested_split != "test":
+        return True
+    spec = DATASET_SPECS.get(source)
+    return spec is None or spec.test_split is not None
 
 
 def _source_selection_limit(
@@ -864,33 +979,33 @@ def normalize_flashrag_sources(
 
     for item in raw_sources:
         if isinstance(item, str):
-            selections.append(
-                _parse_source_string(item, str(data_cfg.get(f"{split}_split", split)))
-            )
+            selection = _parse_source_string(item, str(data_cfg.get(f"{split}_split", split)))
+            if _source_supports_requested_split(selection.name, selection.split):
+                selections.append(selection)
             continue
         if isinstance(item, dict):
             name = item.get("name", item.get("config"))
             if not name:
                 raise ValueError(f"FlashRAG dataset entry is missing name/config: {item}")
-            selections.append(
-                FlashRAGSourceSelection(
-                    name=_canonical_source_name(str(name)),
-                    split=str(
-                        split_specific_value(item, "split")
-                        or data_cfg.get(f"{split}_split", split)
-                    ),
-                    max_examples=(
-                        int(split_specific_value(item, "max_examples"))
-                        if split_specific_value(item, "max_examples") is not None
-                        else None
-                    ),
-                    percent=(
-                        _parse_percent(str(split_specific_value(item, "percent")))
-                        if split_specific_value(item, "percent") is not None
-                        else None
-                    ),
-                )
+            selection = FlashRAGSourceSelection(
+                name=_canonical_source_name(str(name)),
+                split=str(
+                    split_specific_value(item, "split")
+                    or data_cfg.get(f"{split}_split", split)
+                ),
+                max_examples=(
+                    int(split_specific_value(item, "max_examples"))
+                    if split_specific_value(item, "max_examples") is not None
+                    else None
+                ),
+                percent=(
+                    _parse_percent(str(split_specific_value(item, "percent")))
+                    if split_specific_value(item, "percent") is not None
+                    else None
+                ),
             )
+            if _source_supports_requested_split(selection.name, selection.split):
+                selections.append(selection)
             continue
         raise TypeError(f"Unsupported FlashRAG dataset entry: {item!r}")
     return selections
@@ -920,16 +1035,27 @@ def iter_flashrag_selected_examples(
             limit = allocated_limits[selection_idx]
         if limit is not None and limit <= 0:
             continue
-        dataset = load_dataset(dataset_name, selection.name, split=hf_split, streaming=True)
+        if selection.name == "qasc":
+            dataset = load_dataset(QASC_DATASET_NAME, split=hf_split, streaming=True)
+        else:
+            dataset = load_dataset(dataset_name, selection.name, split=hf_split, streaming=True)
         kept = 0
         for row_idx, row in enumerate(dataset):
-            example = convert_flashrag_row(
-                row=dict(row),
-                example_idx=row_idx,
-                max_docs=max_docs,
-                instruction=instruction,
-                config_name=selection.name,
-            )
+            if selection.name == "qasc":
+                example = convert_qasc_row(
+                    row=dict(row),
+                    example_idx=row_idx,
+                    max_docs=max_docs,
+                    instruction=instruction,
+                )
+            else:
+                example = convert_flashrag_row(
+                    row=dict(row),
+                    example_idx=row_idx,
+                    max_docs=max_docs,
+                    instruction=instruction,
+                    config_name=selection.name,
+                )
             if example is None:
                 continue
             yield example

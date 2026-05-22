@@ -20,6 +20,7 @@ _EVALUATE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_EVALUATE)
 _greedy_setswitch = _EVALUATE._greedy_setswitch
 gold_sweep_status = _EVALUATE.gold_sweep_status
+gold_position_sweep_enabled = _EVALUATE.gold_position_sweep_enabled
 load_eval_tokenizer_and_model = _EVALUATE.load_eval_tokenizer_and_model
 score_prediction = _EVALUATE.score_prediction
 
@@ -83,6 +84,12 @@ def test_gold_sweep_status_reports_unmovable_examples():
         "num_non_gold_documents": 2,
         "gold_sweep_movable": False,
     }
+
+
+def test_only_causal_baseline_uses_explicit_gold_position_sweep():
+    assert gold_position_sweep_enabled("chat_baseline") is True
+    assert gold_position_sweep_enabled("setllm") is False
+    assert gold_position_sweep_enabled("setswitch") is False
 
 
 def test_eval_loads_peft_adapter_checkpoint_from_base_model(monkeypatch, tmp_path):
@@ -167,3 +174,23 @@ def test_eval_uses_rouge_l_primary_for_msmarco_qa():
     assert score["primary_metric"] == "rouge_l"
     assert score["primary_score"] == score["rouge_l"]
     assert 0.0 < score["primary_score"] < 1.0
+
+
+def test_eval_uses_accuracy_for_qasc():
+    example = SetSwitchExample(
+        example_id="qasc",
+        instruction="Use docs.",
+        question="Q?\n\nOptions:\nA. blue\nB. red",
+        documents=[
+            SetSwitchDocument("d0", "fact 1", True),
+            SetSwitchDocument("d1", "fact 2", True),
+        ],
+        answer="blue",
+        source="qasc",
+        metadata={"golden_answers": ["blue"], "eval_task_group": "qasc_2hop_mcq"},
+    )
+
+    score = score_prediction(example, "blue")
+
+    assert score["primary_metric"] == "accuracy"
+    assert score["primary_score"] == 1.0
