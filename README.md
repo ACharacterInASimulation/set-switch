@@ -6,10 +6,9 @@ special set, item, read, and gather tokens, then supplies custom position ids an
 custom 4D attention mask.
 
 The v0 path is deliberately narrow: answer-only cross entropy, no auxiliary losses,
-and no permutation-expanded training. The main SetSwitch run keeps LoRA disabled and
-trains only the SetSwitch special-token embedding rows, so we can test whether the
-special tokens, mask, and position policy are sufficient for learning. The normal
-decoder baseline and SetLLM baseline use LoRA.
+and no permutation-expanded training. The main comparison uses the same LoRA budget
+for SetSwitch, SetLLM, and the normal decoder baseline. SetSwitch additionally trains
+only the special-token rows that are actually rendered by the current configuration.
 
 ## Install
 
@@ -108,6 +107,7 @@ train/dev splits for the sources we use.
 Final v0 task buckets:
 
 - `normal_mcq`: `commonsenseqa`, `openbookqa`, `arc`, `hellaswag`, `mmlu`, `quartz`
+- `multihop_mcq`: `qasc`
 - `rag_single_hop`: `msmarco-qa`, `squad`, `boolq`
 - `rag_multi_hop`: `hotpotqa`, `2wikimultihopqa`, `musique`
 - `aggregation`: `ambig_qa`
@@ -118,6 +118,10 @@ multi-hop RAG, and an ambiguous/multi-answer bucket. FlashRAG `piqa` and `siqa` 
 default training sources because the normalized FlashRAG rows do not expose clean
 choice/gold-label structure for the exact SetLLM-style setup; they can be added later
 through native dataset adapters.
+
+QASC is loaded from `allenai/qasc` rather than FlashRAG. It contributes an 8-way
+science multiple-choice task whose two support facts are rendered as evidence
+documents, while the choices are placed in the question text.
 
 Document/passage QA sources include:
 
@@ -145,6 +149,14 @@ Option-set sources:
 - `mmlu`
 - `quartz`
 
+Detailed evaluation buckets are also emitted when metadata is available:
+
+- HotpotQA: `hotpotqa_bridge`, `hotpotqa_comparison`
+- 2WikiMultiHopQA: for example `2wikimultihopqa_compositional`,
+  `2wikimultihopqa_comparison`, and `2wikimultihopqa_bridge_comparison`
+- MuSiQue: `musique_2hop`, `musique_3hop`, `musique_4hop`
+- QASC: `qasc_2hop_mcq`
+
 ## SetLLM Baseline
 
 SetLLM uses the paper's architectural recipe: SetPE position ids, SetMask attention, and
@@ -167,35 +179,40 @@ Choices are not numbered. For document QA, the analogous shared-suite prompt use
 `Passages:` with unnumbered passage text. SetLLM does not use SetSwitch read/gather
 special tokens.
 
-## Single Config
+## Configs
 
-Use [configs/flashrag.yaml](/home/badrinath.chandana/git/ACharacterInASimulation/set-switch/configs/flashrag.yaml)
-for both SetSwitch and the chat baseline. Important fields:
+The shared base config is
+[configs/flashrag.yaml](/home/badrinath.chandana/git/ACharacterInASimulation/set-switch/configs/flashrag.yaml).
+Use the three thin wrapper configs for actual runs:
+
+- [configs/flashrag_setswitch.yaml](/home/badrinath.chandana/git/ACharacterInASimulation/set-switch/configs/flashrag_setswitch.yaml)
+- [configs/flashrag_setllm.yaml](/home/badrinath.chandana/git/ACharacterInASimulation/set-switch/configs/flashrag_setllm.yaml)
+- [configs/flashrag_decoder.yaml](/home/badrinath.chandana/git/ACharacterInASimulation/set-switch/configs/flashrag_decoder.yaml)
+
+Each wrapper uses `extends: flashrag.yaml` and only sets `model_interface`, so data,
+training, and evaluation settings stay synchronized across methods.
+
+Important base fields:
 
 ```yaml
-model_interface: setswitch  # or chat_baseline or setllm
-
 data:
   source: flashrag
-  datasets: [commonsenseqa, openbookqa, arc, hellaswag, mmlu, quartz, msmarco-qa, squad, boolq, hotpotqa, 2wikimultihopqa, musique, ambig_qa]
+  datasets: [...]
   total_train_examples: 100000
-  total_val_examples: 10000
+  total_val_examples: 1000
   sample_allocation: task_balanced_equal
 ```
 
-If `total_train_examples` is set, the default allocation is `task_balanced_equal`:
-first split the budget across task buckets, then split each task bucket across its
-datasets. Small datasets cap at their available split size and unused budget is
-redistributed. This is deliberately not proportional to source size, so MS MARCO cannot
-dominate just because it has many more rows.
+The default 100k train mix is explicit:
 
-For the default 100k train budget, this gives roughly:
+- normal MCQ: 9k total, 1.5k from each normal MCQ source
+- QASC multi-hop MCQ: 6k
+- single-hop RAG: 27k total
+- multi-hop RAG: 50k total
+- AmbigQA aggregation: 8k
 
-- `aggregation`: all available AmbigQA train examples.
-- `rag_single_hop`: about 10k each from MS MARCO-QA, SQuAD, and BoolQ.
-- `rag_multi_hop`: about 10k each from HotpotQA, 2WikiMultiHopQA, and MuSiQue.
-- `normal_mcq`: spread across the MCQ datasets, with small sources capped and the
-  remainder redistributed inside MCQ.
+The train-only limits do not affect validation or evaluation. The default validation
+budget remains 1k and is allocated across the selected dev sources.
 
 The default set size is `max_docs: 20` and keeps full converted documents
 (`max_doc_tokens: null`). This avoids silently cutting away evidence. If you need a
@@ -250,27 +267,25 @@ python scripts/prepare_dataset_suite.py \
   --output data/flashrag_train.jsonl
 ```
 
-Train:
+## Train
 
 ```bash
-accelerate launch scripts/train.py --config configs/flashrag.yaml --interface setswitch
-accelerate launch scripts/train.py --config configs/flashrag.yaml --interface setllm
-accelerate launch scripts/train.py --config configs/flashrag.yaml --interface chat_baseline
+accelerate launch scripts/train.py --config configs/flashrag_setswitch.yaml
+accelerate launch scripts/train.py --config configs/flashrag_setllm.yaml
+accelerate launch scripts/train.py --config configs/flashrag_decoder.yaml
 ```
 
 The training loop uses Accelerate with a custom PyTorch loop, custom masks, custom
 position ids, and answer-only CE. The config uses Qwen/Qwen3-4B by default. Method
-overrides train only SetSwitch special-token embeddings for SetSwitch and enable LoRA
-for the normal decoder baseline and SetLLM.
+overrides enable LoRA for all three methods. SetSwitch additionally wraps and trains
+the rendered SetSwitch special-token rows with a separate optimizer group.
 
 Learning rates are method-specific:
 
-- `setswitch`: `3e-3`, because only the SetSwitch special-token embedding rows are
-  trainable. This is closer to soft-prompt/special-token tuning, where tiny trainable
-  parameter sets usually need higher LR.
-- `setllm`: `3e-4`, matching the lower end of the SetLLM paper's LoRA sweep.
-- `chat_baseline`: `3e-4`, so the normal decoder baseline has comparable LoRA
-  adaptation strength.
+- SetSwitch LoRA/base group: `3e-4`
+- SetSwitch special-token table: `1e-3`
+- SetLLM LoRA: `3e-4`
+- decoder baseline LoRA: `3e-4`
 
 Runs write local JSONL metrics even without W&B:
 
@@ -297,17 +312,46 @@ Visible item text should not contain document or option indices such as `Documen
 `Option A`. The SetSwitch renderer uses only repeated `<item>` delimiters; the baseline
 renderer uses repeated unnumbered `Passage:` or `Option:` blocks.
 
-Evaluate held-out accuracy with gold item placement sweeps:
+## Evaluate
+
+After training, evaluate the final checkpoints:
 
 ```bash
-python scripts/evaluate.py --config configs/flashrag.yaml --interface setswitch
+python scripts/evaluate.py \
+  --config configs/flashrag_setswitch.yaml \
+  --checkpoint outputs/qwen3_4b_setswitch/final
+
+python scripts/evaluate.py \
+  --config configs/flashrag_setllm.yaml \
+  --checkpoint outputs/qwen3_4b_setllm_lora/final
+
+python scripts/evaluate.py \
+  --config configs/flashrag_decoder.yaml \
+  --checkpoint outputs/qwen3_4b_chat_baseline/final
 ```
 
 The `eval:` block in the config controls split, sample count, generation length, output
-path, and gold-position sweep. The report separates task buckets and evaluates gold
-items placed around 0%, 25%, 50%, 75%, and 100% of the set. Many FlashRAG sources
-provide `dev` rather than `test`; use `--split test` only for sources that actually
-expose a test split.
+path, and gold-position sweep. The decoder baseline performs the explicit
+gold-position sweep. SetSwitch and SetLLM generate once per example and report the same
+score across the sweep buckets because their set interfaces are structurally
+permutation-invariant.
+
+Evaluate the labeled test split:
+
+```bash
+python scripts/evaluate.py \
+  --config configs/flashrag_setswitch.yaml \
+  --checkpoint outputs/qwen3_4b_setswitch/final \
+  --split test
+```
+
+For the current suite, `--split test` includes only selected sources with labeled test
+splits: OpenBookQA, ARC, MMLU, QuaRTz, and QASC. Their known total is 19,794 examples;
+the default `eval.max_examples: 1000` samples from them.
+
+The report writes task, source, and overall summaries. Primary metrics are normalized
+accuracy for MCQ/BoolQ/QASC, ROUGE-L for MS MARCO QA, and token F1 for the other QA and
+multi-hop sources, with exact match and token F1 also logged per row.
 
 ## Inspect And Debug
 
