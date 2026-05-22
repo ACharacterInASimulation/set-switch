@@ -37,6 +37,9 @@ class RenderConfig:
     add_bos_token: bool = False
     append_eos_token: bool = False
     compact_special_token_format: bool = False
+    answer_prefix: str = ""
+    read_gather_position_mode: str = "zero"
+    use_boundary_tokens: bool = True
 
 
 def render_config_from_obj(cfg: Any | None) -> RenderConfig:
@@ -51,6 +54,10 @@ def render_config_from_obj(cfg: Any | None) -> RenderConfig:
             return data.get(name, default)
         return getattr(data, name, default)
 
+    answer_prefix = get("setswitch_answer_prefix", None)
+    if answer_prefix is None:
+        answer_prefix = get("answer_prefix", "")
+
     return RenderConfig(
         num_reads_per_doc=int(get("num_reads_per_doc", DEFAULT_NUM_READS_PER_DOC)),
         num_gather_tokens=int(get("num_gather_tokens", DEFAULT_NUM_GATHER_TOKENS)),
@@ -59,6 +66,9 @@ def render_config_from_obj(cfg: Any | None) -> RenderConfig:
         add_bos_token=bool(get("add_bos_token", False)),
         append_eos_token=bool(get("append_eos_token", False)),
         compact_special_token_format=bool(get("compact_special_token_format", False)),
+        answer_prefix=str(answer_prefix),
+        read_gather_position_mode=str(get("read_gather_position_mode", "zero")).lower(),
+        use_boundary_tokens=bool(get("setswitch_boundary_tokens", True)),
     )
 
 
@@ -101,28 +111,44 @@ def render_prompt_text(
     num_reads_per_doc: int = DEFAULT_NUM_READS_PER_DOC,
     num_gather_tokens: int = DEFAULT_NUM_GATHER_TOKENS,
     compact_special_token_format: bool = False,
+    answer_prefix: str = "",
+    use_boundary_tokens: bool = True,
 ) -> str:
     """Render human-readable canonical prompt text, without the answer."""
 
     if compact_special_token_format:
-        parts = [_render_prefix(example), SET_TOKEN]
+        parts = [_render_prefix(example)]
+        if use_boundary_tokens:
+            parts.append(SET_TOKEN)
         for doc in example.documents:
-            parts.append(ITEM_TOKEN)
+            if use_boundary_tokens:
+                parts.append(ITEM_TOKEN)
             parts.append(doc.text.rstrip())
             parts.extend(READ_TOKENS[:num_reads_per_doc])
-            parts.append(END_ITEM_TOKEN)
-        parts.append(END_SET_TOKEN)
+            if use_boundary_tokens:
+                parts.append(END_ITEM_TOKEN)
+            else:
+                parts.append("\n")
+        if use_boundary_tokens:
+            parts.append(END_SET_TOKEN)
         parts.extend(GATHER_TOKENS[:num_gather_tokens])
+        parts.append(answer_prefix)
         return "".join(parts)
 
-    lines = [_render_prefix(example), f"{SET_TOKEN}\n"]
+    lines = [_render_prefix(example)]
+    if use_boundary_tokens:
+        lines.append(f"{SET_TOKEN}\n")
     for doc in example.documents:
-        lines.append(f"{ITEM_TOKEN}\n")
+        if use_boundary_tokens:
+            lines.append(f"{ITEM_TOKEN}\n")
         lines.append(doc.text.rstrip() + "\n")
         lines.append(" ".join(READ_TOKENS[:num_reads_per_doc]) + "\n")
-        lines.append(f"{END_ITEM_TOKEN}\n")
-    lines.append(f"{END_SET_TOKEN}\n")
+        if use_boundary_tokens:
+            lines.append(f"{END_ITEM_TOKEN}\n")
+    if use_boundary_tokens:
+        lines.append(f"{END_SET_TOKEN}\n")
     lines.append(" ".join(GATHER_TOKENS[:num_gather_tokens]) + "\n\n")
+    lines.append(answer_prefix)
     return "".join(lines)
 
 
@@ -161,17 +187,18 @@ def render_example(
     _append(input_ids, role_ids, item_ids, read_slot_ids, gather_slot_ids, prefix_ids, ROLE_PREFIX)
     prefix_length = len(input_ids)
 
-    _append(
-        input_ids,
-        role_ids,
-        item_ids,
-        read_slot_ids,
-        gather_slot_ids,
-        [_special_id(tokenizer, SET_TOKEN)],
-        ROLE_SET_SPECIAL,
-    )
+    if rcfg.use_boundary_tokens:
+        _append(
+            input_ids,
+            role_ids,
+            item_ids,
+            read_slot_ids,
+            gather_slot_ids,
+            [_special_id(tokenizer, SET_TOKEN)],
+            ROLE_SET_SPECIAL,
+        )
     newline_ids = _encode(tokenizer, "\n")
-    if not rcfg.compact_special_token_format:
+    if rcfg.use_boundary_tokens and not rcfg.compact_special_token_format:
         _append(
             input_ids,
             role_ids,
@@ -183,17 +210,18 @@ def render_example(
         )
 
     for doc_idx, doc in enumerate(example.documents):
-        _append(
-            input_ids,
-            role_ids,
-            item_ids,
-            read_slot_ids,
-            gather_slot_ids,
-            [_special_id(tokenizer, ITEM_TOKEN)],
-            ROLE_ITEM_SPECIAL,
-            item_id=doc_idx,
-        )
-        if not rcfg.compact_special_token_format:
+        if rcfg.use_boundary_tokens:
+            _append(
+                input_ids,
+                role_ids,
+                item_ids,
+                read_slot_ids,
+                gather_slot_ids,
+                [_special_id(tokenizer, ITEM_TOKEN)],
+                ROLE_ITEM_SPECIAL,
+                item_id=doc_idx,
+            )
+        if rcfg.use_boundary_tokens and not rcfg.compact_special_token_format:
             _append(
                 input_ids,
                 role_ids,
@@ -268,17 +296,29 @@ def render_example(
                 ROLE_ITEM_SPECIAL,
                 item_id=doc_idx,
             )
-        _append(
-            input_ids,
-            role_ids,
-            item_ids,
-            read_slot_ids,
-            gather_slot_ids,
-            [_special_id(tokenizer, END_ITEM_TOKEN)],
-            ROLE_ITEM_SPECIAL,
-            item_id=doc_idx,
-        )
-        if not rcfg.compact_special_token_format:
+        if rcfg.use_boundary_tokens:
+            _append(
+                input_ids,
+                role_ids,
+                item_ids,
+                read_slot_ids,
+                gather_slot_ids,
+                [_special_id(tokenizer, END_ITEM_TOKEN)],
+                ROLE_ITEM_SPECIAL,
+                item_id=doc_idx,
+            )
+        elif rcfg.compact_special_token_format:
+            _append(
+                input_ids,
+                role_ids,
+                item_ids,
+                read_slot_ids,
+                gather_slot_ids,
+                newline_ids,
+                ROLE_ITEM_SPECIAL,
+                item_id=doc_idx,
+            )
+        if rcfg.use_boundary_tokens and not rcfg.compact_special_token_format:
             _append(
                 input_ids,
                 role_ids,
@@ -290,16 +330,17 @@ def render_example(
                 item_id=doc_idx,
             )
 
-    _append(
-        input_ids,
-        role_ids,
-        item_ids,
-        read_slot_ids,
-        gather_slot_ids,
-        [_special_id(tokenizer, END_SET_TOKEN)],
-        ROLE_SET_SPECIAL,
-    )
-    if not rcfg.compact_special_token_format:
+    if rcfg.use_boundary_tokens:
+        _append(
+            input_ids,
+            role_ids,
+            item_ids,
+            read_slot_ids,
+            gather_slot_ids,
+            [_special_id(tokenizer, END_SET_TOKEN)],
+            ROLE_SET_SPECIAL,
+        )
+    if rcfg.use_boundary_tokens and not rcfg.compact_special_token_format:
         _append(
             input_ids,
             role_ids,
@@ -343,6 +384,17 @@ def render_example(
             ROLE_SET_SPECIAL,
         )
 
+    answer_prefix_ids = _encode(tokenizer, rcfg.answer_prefix)
+    _append(
+        input_ids,
+        role_ids,
+        item_ids,
+        read_slot_ids,
+        gather_slot_ids,
+        answer_prefix_ids,
+        ROLE_ANSWER,
+    )
+
     answer_start = len(input_ids)
     answer_ids = _encode(tokenizer, example.answer)
     if rcfg.append_eos_token and getattr(tokenizer, "eos_token_id", None) is not None:
@@ -355,7 +407,14 @@ def render_example(
     for idx in range(answer_start):
         labels[idx] = IGNORE_INDEX
 
-    position_ids = build_position_ids(role_ids, item_ids, prefix_length=prefix_length)
+    position_ids = build_position_ids(
+        role_ids,
+        item_ids,
+        prefix_length=prefix_length,
+        read_slot_ids=read_slot_ids,
+        gather_slot_ids=gather_slot_ids,
+        read_gather_position_mode=rcfg.read_gather_position_mode,
+    )
 
     return {
         "input_ids": input_ids,

@@ -21,6 +21,7 @@ _SPEC.loader.exec_module(_EVALUATE)
 _greedy_setswitch = _EVALUATE._greedy_setswitch
 gold_sweep_status = _EVALUATE.gold_sweep_status
 load_eval_tokenizer_and_model = _EVALUATE.load_eval_tokenizer_and_model
+score_prediction = _EVALUATE.score_prediction
 
 
 class RecordingGreedyModel:
@@ -119,3 +120,50 @@ def test_eval_loads_peft_adapter_checkpoint_from_base_model(monkeypatch, tmp_pat
     assert calls["add_setswitch_tokens"] is False
     assert calls["adapter_model"] == "base-model"
     assert calls["adapter_checkpoint"] == str(tmp_path)
+
+
+def test_eval_uses_accuracy_for_options_and_f1_for_qa():
+    option_example = SetSwitchExample(
+        example_id="mcq",
+        instruction="Use docs.",
+        question="Q?",
+        documents=[SetSwitchDocument("d0", "Candidate answer: blue", True)],
+        answer="blue",
+        source="flashrag_commonsenseqa",
+        metadata={"set_type": "options", "golden_answers": ["blue"]},
+    )
+    qa_example = SetSwitchExample(
+        example_id="qa",
+        instruction="Use docs.",
+        question="Q?",
+        documents=[SetSwitchDocument("d0", "Paris is in France.", True)],
+        answer="Paris France",
+        source="flashrag_squad",
+        metadata={"golden_answers": ["Paris France"]},
+    )
+
+    option_score = score_prediction(option_example, "blue")
+    qa_score = score_prediction(qa_example, "Paris")
+
+    assert option_score["primary_metric"] == "accuracy"
+    assert option_score["primary_score"] == 1.0
+    assert qa_score["primary_metric"] == "token_f1"
+    assert 0.0 < qa_score["primary_score"] < 1.0
+
+
+def test_eval_uses_rouge_l_primary_for_msmarco_qa():
+    example = SetSwitchExample(
+        example_id="msmarco",
+        instruction="Use docs.",
+        question="Q?",
+        documents=[SetSwitchDocument("d0", "The answer is a blue car.", True)],
+        answer="a blue car",
+        source="flashrag_msmarco-qa",
+        metadata={"golden_answers": ["a blue car"]},
+    )
+
+    score = score_prediction(example, "blue")
+
+    assert score["primary_metric"] == "rouge_l"
+    assert score["primary_score"] == score["rouge_l"]
+    assert 0.0 < score["primary_score"] < 1.0

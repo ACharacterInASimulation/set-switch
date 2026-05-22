@@ -8,6 +8,7 @@ from set_switch.constants import (
     ITEM_TOKEN,
     READ_TOKENS,
     ROLE_GATHER,
+    ROLE_ANSWER,
     ROLE_READ,
     SET_TOKEN,
     SETSWITCH_SPECIAL_TOKENS,
@@ -78,3 +79,51 @@ def test_setswitch_can_append_eos_to_answer_labels(tokenizer, example):
     assert rendered["input_ids"][-1] == tokenizer.eos_token_id
     assert rendered["labels"][-1] == tokenizer.eos_token_id
     assert tokenizer.decode(rendered["input_ids"][rendered["answer_start"] : -1]) == example.answer
+
+
+def test_setswitch_answer_prefix_is_masked_but_answer_visible(tokenizer, example):
+    add_setswitch_special_tokens(tokenizer, None)
+    rendered = render_example(
+        example,
+        tokenizer,
+        {
+            "num_reads_per_doc": 2,
+            "num_gather_tokens": 4,
+            "setswitch_answer_prefix": "\nAnswer:\n",
+        },
+    )
+
+    answer_start = rendered["answer_start"]
+    decoded_prompt = tokenizer.decode(rendered["input_ids"][:answer_start])
+
+    assert decoded_prompt.endswith("\nAnswer:\n")
+    assert tokenizer.decode(rendered["input_ids"][answer_start:]) == example.answer
+    assert all(label == IGNORE_INDEX for label in rendered["labels"][:answer_start])
+    prefix_len = len(tokenizer.encode("\nAnswer:\n", add_special_tokens=False))
+    assert rendered["role_ids"][answer_start - prefix_len : answer_start] == [
+        ROLE_ANSWER
+    ] * prefix_len
+
+
+def test_setswitch_can_render_without_boundary_tokens(tokenizer, example):
+    add_setswitch_special_tokens(tokenizer, None)
+    rendered = render_example(
+        example,
+        tokenizer,
+        {
+            "num_reads_per_doc": 2,
+            "num_gather_tokens": 4,
+            "setswitch_boundary_tokens": False,
+            "compact_special_token_format": True,
+        },
+    )
+    decoded = tokenizer.decode(rendered["input_ids"][: rendered["answer_start"]])
+
+    assert SET_TOKEN not in decoded
+    assert ITEM_TOKEN not in decoded
+    assert END_SET_TOKEN not in decoded
+    assert END_ITEM_TOKEN not in decoded
+    assert READ_TOKENS[0] in decoded
+    assert GATHER_TOKENS[0] in decoded
+    assert rendered["role_ids"].count(ROLE_READ) == len(example.documents) * 2
+    assert rendered["role_ids"].count(ROLE_GATHER) == 4

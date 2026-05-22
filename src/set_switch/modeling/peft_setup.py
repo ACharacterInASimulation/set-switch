@@ -8,6 +8,15 @@ from typing import Any
 import torch
 from torch import nn
 
+from set_switch.constants import (
+    END_ITEM_TOKEN,
+    END_SET_TOKEN,
+    GATHER_TOKENS,
+    ITEM_TOKEN,
+    READ_TOKENS,
+    SET_TOKEN,
+)
+
 SPECIAL_TOKEN_EMBEDDINGS_FILE = "setswitch_special_embeddings.pt"
 
 
@@ -63,6 +72,12 @@ class SpecialTokenEmbeddingWrapper(nn.Module):
         )
         with torch.no_grad():
             self.special_embeddings.weight.copy_(base_embedding.weight[token_tensor])
+        self.register_buffer(
+            "_lr_multipliers",
+            torch.ones(len(token_tensor), dtype=base_embedding.weight.dtype),
+            persistent=False,
+        )
+        self.special_embeddings.weight.register_hook(self._scale_special_embedding_grad)
 
     @property
     def weight(self) -> torch.Tensor:
@@ -90,6 +105,21 @@ class SpecialTokenEmbeddingWrapper(nn.Module):
         )
         return embeddings
 
+    def _scale_special_embedding_grad(self, grad: torch.Tensor) -> torch.Tensor:
+        return grad * self._lr_multipliers.to(device=grad.device, dtype=grad.dtype).unsqueeze(1)
+
+    def set_lr_multipliers_by_token_id(self, multipliers: dict[int, float]) -> None:
+        values = torch.ones_like(self._lr_multipliers)
+        token_to_slot = {
+            int(token_id): slot
+            for slot, token_id in enumerate(self.special_token_ids.detach().cpu().tolist())
+        }
+        for token_id, multiplier in multipliers.items():
+            slot = token_to_slot.get(int(token_id))
+            if slot is not None:
+                values[slot] = float(multiplier)
+        self._lr_multipliers.copy_(values.to(device=self._lr_multipliers.device))
+
     def merged_weight(self) -> torch.Tensor:
         weight = self.base_embedding.weight.detach().clone()
         weight[self.special_token_ids.to(weight.device)] = self.special_embeddings.weight.detach().to(
@@ -111,6 +141,34 @@ def _apply_special_token_embedding_wrapper(model: Any, token_ids: list[int]) -> 
 def special_token_embedding_wrapper(model: Any) -> SpecialTokenEmbeddingWrapper | None:
     embeddings = model.get_input_embeddings()
     return embeddings if isinstance(embeddings, SpecialTokenEmbeddingWrapper) else None
+
+
+def configure_special_token_lr_multipliers(
+    model: Any,
+    token_ids: dict[str, int] | None,
+    train_cfg: dict[str, Any],
+) -> None:
+    wrapper = special_token_embedding_wrapper(model)
+    if wrapper is None or not token_ids:
+        return
+    config = train_cfg.get("special_token_lr_multipliers", {})
+    if not isinstance(config, dict):
+        raise ValueError("special_token_lr_multipliers must be a mapping")
+    boundary_tokens = {SET_TOKEN, END_SET_TOKEN, ITEM_TOKEN, END_ITEM_TOKEN}
+    multipliers: dict[int, float] = {}
+    for token, token_id in token_ids.items():
+        if token in READ_TOKENS:
+            key = "read"
+        elif token in GATHER_TOKENS:
+            key = "gather"
+        elif token in boundary_tokens:
+            key = "boundary"
+        else:
+            key = "other"
+        multipliers[int(token_id)] = float(
+            config.get(token, config.get(key, config.get("default", 1.0)))
+        )
+    wrapper.set_lr_multipliers_by_token_id(multipliers)
 
 
 def save_special_token_embeddings(model: Any, output_dir: str | Path) -> None:

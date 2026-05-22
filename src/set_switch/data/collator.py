@@ -16,6 +16,8 @@ from set_switch.modeling.attention_mask import build_setswitch_attention_mask
 class SetSwitchCollator:
     tokenizer: Any
     attention_mode: str = DOC_CAUSAL
+    answer_attends_raw_docs: bool = False
+    answer_attends_reads: bool = False
     mask_dtype: torch.dtype = torch.float32
     pad_to_multiple_of: int | None = None
 
@@ -72,6 +74,8 @@ class SetSwitchCollator:
             read_slot_ids=read_slot_ids,
             gather_slot_ids=gather_slot_ids,
             attention_mode=self.attention_mode,
+            answer_attends_raw_docs=self.answer_attends_raw_docs,
+            answer_attends_reads=self.answer_attends_reads,
             pad_mask=pad_mask,
             dtype=self.mask_dtype,
         )

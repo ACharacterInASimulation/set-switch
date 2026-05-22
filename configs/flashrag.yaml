@@ -34,14 +34,22 @@ method_overrides:
       attn_implementation: eager
       use_lora: true
       trainable: setswitch_tokens
+      setswitch_token_init: semantic
+      setswitch_token_init_noise_std: 0.01
       lora_r: 8
       lora_alpha: 1
       lora_dropout: 0.0
       lora_target_modules: all-linear
     train:
       # Fair primary comparison: SetSwitch special tokens plus the same LoRA
-      # budget used by the SetLLM baseline.
+      # budget used by the SetLLM baseline. The small SetSwitch embedding table
+      # gets a higher prompt-tuning-style LR.
       learning_rate: 0.0003
+      special_token_learning_rate: 0.001
+      special_token_lr_multipliers:
+        boundary: 1.0
+        read: 1.0
+        gather: 1.0
   setllm:
     run_name: qwen3_4b_setllm_lora
     model:
@@ -76,9 +84,15 @@ data:
     - msmarco-qa
     - squad
     - boolq
-    - hotpotqa
-    - 2wikimultihopqa
-    - musique
+    # Hard multihop sources are intentionally overrepresented in train only,
+    # because this is the main claim surface for SetSwitch. Dev/eval still use
+    # total_val_examples and task-balanced allocation.
+    - name: hotpotqa
+      train_max_examples: 6000
+    - name: 2wikimultihopqa
+      train_max_examples: 6000
+    - name: musique
+      train_max_examples: 6000
     - ambig_qa
   #
   # Compact percentage syntax is also supported. hotpotqa[:0.5] means 50% of
@@ -115,6 +129,9 @@ data:
   num_reads_per_doc: 2
   num_gather_tokens: 4
   compact_special_token_format: true
+  setswitch_boundary_tokens: true
+  read_gather_position_mode: continuous
+  setswitch_answer_prefix: "\nAnswer:\n"
   append_eos_token: true
   setllm_append_eos_token: true
   instruction: "Use the provided passages or options to answer the question. Treat the items as an unordered set."

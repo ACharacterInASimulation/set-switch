@@ -38,7 +38,12 @@ def load_tokenizer_and_model(model_cfg: dict[str, Any], add_setswitch_tokens: bo
         kwargs["attn_implementation"] = model_cfg["attn_implementation"]
     model = AutoModelForCausalLM.from_pretrained(name_or_path, **kwargs)
     if add_setswitch_tokens:
-        add_setswitch_special_tokens(tokenizer, model)
+        add_setswitch_special_tokens(
+            tokenizer,
+            model,
+            init_strategy=str(model_cfg.get("setswitch_token_init", "resize_default")),
+            init_noise_std=float(model_cfg.get("setswitch_token_init_noise_std", 0.01)),
+        )
     elif model.get_input_embeddings().weight.shape[0] != len(tokenizer):
         model.resize_token_embeddings(len(tokenizer))
     model.config.use_cache = False

@@ -48,6 +48,8 @@ def _vectorized_allowed(
     items: torch.Tensor,
     valid: torch.Tensor,
     attention_mode: str,
+    answer_attends_raw_docs: bool,
+    answer_attends_reads: bool,
 ) -> torch.Tensor:
     batch_size, seq_len = roles.shape
     del batch_size
@@ -95,10 +97,18 @@ def _vectorized_allowed(
     allowed |= q_doc & (k_prefix | (same_item & (doc_to_doc | (k_item_special & causal))))
     allowed |= q_read & (k_prefix | (same_item & (k_doc | k_read | k_item_special)))
     allowed |= q_gather & (k_prefix | k_read | k_gather)
-    allowed |= q_answer & (k_prefix | k_gather | (k_answer & causal))
+    answer_keys = k_prefix | k_gather | (k_answer & causal)
+    if answer_attends_raw_docs:
+        answer_keys = answer_keys | k_doc
+    if answer_attends_reads:
+        answer_keys = answer_keys | k_read
+    allowed |= q_answer & answer_keys
 
     allowed &= valid_pair
     allowed &= (q_role != ROLE_PAD) & (k_role != ROLE_PAD)
+    pad_batch_idx, pad_query_idx = torch.nonzero(~valid, as_tuple=True)
+    if pad_batch_idx.numel():
+        allowed[pad_batch_idx, pad_query_idx, pad_query_idx] = True
     return allowed
 
 
@@ -108,6 +118,8 @@ def build_setswitch_attention_mask(
     read_slot_ids: Sequence[int] | Sequence[Sequence[int]] | torch.Tensor | None = None,
     gather_slot_ids: Sequence[int] | Sequence[Sequence[int]] | torch.Tensor | None = None,
     attention_mode: str = DOC_CAUSAL,
+    answer_attends_raw_docs: bool = False,
+    answer_attends_reads: bool = False,
     pad_mask: Sequence[bool] | Sequence[Sequence[bool]] | torch.Tensor | None = None,
     dtype: torch.dtype = torch.float32,
     device: torch.device | str | None = None,
@@ -139,6 +151,8 @@ def build_setswitch_attention_mask(
         items=items,
         valid=valid,
         attention_mode=attention_mode,
+        answer_attends_raw_docs=answer_attends_raw_docs,
+        answer_attends_reads=answer_attends_reads,
     )
 
     mask = torch.full(

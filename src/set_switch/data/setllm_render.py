@@ -76,6 +76,7 @@ def _set_item_texts(example: SetSwitchExample) -> tuple[str, list[str]]:
 def render_setllm_prompt_text(example: SetSwitchExample) -> str:
     set_name, item_texts = _set_item_texts(example)
     return (
+        f"Instruction: {example.instruction}\n\n"
         f"Question: {example.question}\n\n"
         f"{set_name}:\n" + "\n".join(item_texts) + "\n\nAnswer:\n"
     )
@@ -91,7 +92,10 @@ def render_setllm_example(
     rcfg = setllm_render_config_from_obj(cfg)
     set_name, item_texts = _set_item_texts(example)
 
-    prefix_ids = _encode(tokenizer, f"Question: {example.question}\n\n{set_name}:\n")
+    prefix_ids = _encode(
+        tokenizer,
+        f"Instruction: {example.instruction}\n\nQuestion: {example.question}\n\n{set_name}:\n",
+    )
     if example.metadata.get("set_type", "documents") == "options":
         set_item_ids = [
             _truncate_ids(_encode(tokenizer, text.strip() + "\n"), rcfg.max_doc_tokens)

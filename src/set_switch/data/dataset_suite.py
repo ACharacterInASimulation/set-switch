@@ -852,6 +852,16 @@ def normalize_flashrag_sources(
     if isinstance(raw_sources, dict):
         raw_sources = [{"name": name, **(value or {})} for name, value in raw_sources.items()]
 
+    def split_specific_value(item: dict[str, Any], field: str) -> Any:
+        aliases = [split]
+        if split in {"dev", "validation", "val"}:
+            aliases.extend(["validation", "val", "dev", "eval"])
+        for alias in dict.fromkeys(aliases):
+            key = f"{alias}_{field}"
+            if item.get(key) is not None:
+                return item[key]
+        return item.get(field)
+
     for item in raw_sources:
         if isinstance(item, str):
             selections.append(
@@ -865,13 +875,18 @@ def normalize_flashrag_sources(
             selections.append(
                 FlashRAGSourceSelection(
                     name=_canonical_source_name(str(name)),
-                    split=str(item.get("split", data_cfg.get(f"{split}_split", split))),
+                    split=str(
+                        split_specific_value(item, "split")
+                        or data_cfg.get(f"{split}_split", split)
+                    ),
                     max_examples=(
-                        int(item["max_examples"]) if item.get("max_examples") is not None else None
+                        int(split_specific_value(item, "max_examples"))
+                        if split_specific_value(item, "max_examples") is not None
+                        else None
                     ),
                     percent=(
-                        _parse_percent(str(item["percent"]))
-                        if item.get("percent") is not None
+                        _parse_percent(str(split_specific_value(item, "percent")))
+                        if split_specific_value(item, "percent") is not None
                         else None
                     ),
                 )

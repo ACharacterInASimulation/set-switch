@@ -11,7 +11,7 @@ from set_switch.data.setllm_render import render_setllm_example
 def _option_example() -> SetSwitchExample:
     return SetSwitchExample(
         example_id="setllm-options",
-        instruction="unused by SetLLM paper prompt",
+        instruction="Use the provided options.",
         question="Which option is correct?",
         documents=[
             SetSwitchDocument("a", "Candidate answer: red", False, {"choice_text": "red"}),
@@ -27,7 +27,10 @@ def test_setllm_uses_modified_unnumbered_choice_prompt(tokenizer):
     rendered = render_setllm_example(_option_example(), tokenizer)
     decoded = tokenizer.decode(rendered["input_ids"])
 
-    assert decoded.startswith("Question: Which option is correct?\n\nChoices:\n")
+    assert decoded.startswith(
+        "Instruction: Use the provided options.\n\n"
+        "Question: Which option is correct?\n\nChoices:\n"
+    )
     assert "\nred\nblue\n\nAnswer:\nblue" in decoded
     assert "<set>" not in decoded
     assert "Option A" not in decoded
@@ -65,3 +68,23 @@ def test_setllm_setmask_blocks_cross_item_edges(tokenizer):
     assert bool(allowed[answer, item1[0]])
     assert not bool(allowed[0, answer])
     assert bool(torch.all(batch["labels"][batch["pad_mask"] == 0] == IGNORE_INDEX))
+
+
+def test_setllm_padding_rows_have_defined_attention(tokenizer):
+    short = _option_example()
+    long = _option_example()
+    long.documents[1] = SetSwitchDocument(
+        "b",
+        "Candidate answer: blue",
+        True,
+        {"choice_text": "blue with a much longer explanatory option"},
+    )
+    batch = SetLLMCollator(tokenizer)(
+        [render_setllm_example(short, tokenizer), render_setllm_example(long, tokenizer)]
+    )
+    allowed = batch["attention_mask"][:, 0] == 0
+
+    assert allowed.any(dim=-1).all()
+    for batch_idx in range(allowed.shape[0]):
+        valid = batch["pad_mask"][batch_idx]
+        assert not allowed[batch_idx][valid][:, ~valid].any()

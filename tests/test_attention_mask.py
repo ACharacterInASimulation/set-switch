@@ -101,6 +101,25 @@ def test_read_gather_and_answer_rules():
     assert not allowed[16, 17]
 
 
+def test_answer_attention_ablation_flags():
+    role_ids, item_ids, read_slots, gather_slots = _toy_roles()
+    mask = build_setswitch_attention_mask(
+        role_ids,
+        item_ids,
+        read_slots,
+        gather_slots,
+        attention_mode=DOC_CAUSAL,
+        answer_attends_raw_docs=True,
+        answer_attends_reads=True,
+    )
+    allowed = mask[0, 0] == 0
+
+    assert allowed[16, 4]
+    assert allowed[16, 6]
+    assert allowed[16, 9]
+    assert allowed[16, 11]
+
+
 def test_padding_is_never_attended():
     role_ids, item_ids, read_slots, gather_slots = _toy_roles()
     role_ids = role_ids + [ROLE_PREFIX]
@@ -119,8 +138,9 @@ def test_padding_is_never_attended():
     )
     allowed = mask[0, 0] == 0
 
-    assert not allowed[:, -1].any()
-    assert not allowed[-1, :].any()
+    assert not allowed[:-1, -1].any()
+    assert allowed[-1, -1]
+    assert not allowed[-1, :-1].any()
 
 
 def test_custom_mask_dtype_is_configurable():

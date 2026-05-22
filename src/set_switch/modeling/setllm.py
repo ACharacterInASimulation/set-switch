@@ -95,6 +95,9 @@ def _vectorized_allowed(
     allowed &= ~cross_item
     allowed &= valid_pair
     allowed &= (q_role != ROLE_PAD) & (k_role != ROLE_PAD)
+    pad_batch_idx, pad_query_idx = torch.nonzero(~valid, as_tuple=True)
+    if pad_batch_idx.numel():
+        allowed[pad_batch_idx, pad_query_idx, pad_query_idx] = True
     return allowed.reshape(batch_size, seq_len, seq_len)
 
 

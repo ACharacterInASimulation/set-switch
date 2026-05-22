@@ -256,6 +256,20 @@ def test_compact_percentage_source_syntax():
     assert selections[2] == FlashRAGSourceSelection(name="msmarco-qa", split="train", percent=0.01)
 
 
+def test_split_specific_flashrag_limits_only_affect_requested_split():
+    train_selection = normalize_flashrag_sources(
+        {"datasets": [{"name": "hotpotqa", "train_max_examples": 6000}]},
+        split="train",
+    )
+    dev_selection = normalize_flashrag_sources(
+        {"datasets": [{"name": "hotpotqa", "train_max_examples": 6000}]},
+        split="dev",
+    )
+
+    assert train_selection[0].max_examples == 6000
+    assert dev_selection[0].max_examples is None
+
+
 def test_task_balanced_equal_allocation_prevents_msmarco_domination():
     selections = normalize_flashrag_sources(
         {

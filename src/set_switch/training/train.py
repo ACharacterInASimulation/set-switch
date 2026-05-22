@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -27,11 +28,12 @@ from set_switch.data.setllm_render import render_setllm_example
 from set_switch.modeling.load_model import dtype_from_name, load_tokenizer_and_model
 from set_switch.modeling.peft_setup import (
     apply_trainable_parameter_policy,
+    configure_special_token_lr_multipliers,
     merged_special_token_state_dict,
     maybe_apply_lora,
     save_special_token_embeddings,
 )
-from set_switch.modeling.special_tokens import token_id_map
+from set_switch.modeling.special_tokens import active_token_id_map
 from set_switch.training.eval_simple import evaluate_answer_ce
 from set_switch.utils.io import read_examples_jsonl, read_yaml
 from set_switch.utils.logging import JsonlMetricLogger
@@ -160,6 +162,63 @@ def infinite_dataloader(dataloader: DataLoader) -> Iterator[Any]:
             raise ValueError("Cannot train with an empty dataloader")
 
 
+def _nonfinite_batch_summary(batch: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "example_id": batch.get("example_id", []),
+        "input_shape": tuple(batch["input_ids"].shape),
+    }
+    if "pad_mask" in batch:
+        summary["input_lengths"] = batch["pad_mask"].sum(dim=1).detach().cpu().tolist()
+    if "answer_start" in batch:
+        summary["answer_start"] = batch["answer_start"].detach().cpu().tolist()
+    if "attention_mask" in batch:
+        attention_mask = batch["attention_mask"]
+        summary["attention_mask_finite"] = bool(torch.isfinite(attention_mask).all().item())
+        summary["attention_rows_with_allowed_key"] = bool((attention_mask[:, 0] == 0).any(dim=-1).all().item())
+    return summary
+
+
+def optimizer_param_groups(
+    model: torch.nn.Module,
+    learning_rate: float,
+    weight_decay: float,
+    special_token_learning_rate: float | None = None,
+) -> list[dict[str, Any]]:
+    base_params: list[torch.nn.Parameter] = []
+    special_token_params: list[torch.nn.Parameter] = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if ".special_embeddings." in name or name.endswith("special_embeddings.weight"):
+            special_token_params.append(param)
+        else:
+            base_params.append(param)
+
+    groups: list[dict[str, Any]] = []
+    if base_params:
+        groups.append(
+            {
+                "params": base_params,
+                "lr": learning_rate,
+                "weight_decay": weight_decay,
+                "name": "base",
+            }
+        )
+    if special_token_params:
+        groups.append(
+            {
+                "params": special_token_params,
+                "lr": special_token_learning_rate or learning_rate,
+                "weight_decay": weight_decay,
+                "name": "setswitch_special_tokens",
+            }
+        )
+    if not groups:
+        raise ValueError("No trainable parameters found")
+    return groups
+
+
 def _save_training_checkpoint(
     model: Any,
     tokenizer: Any,
@@ -196,10 +255,12 @@ def train_from_config(cfg: dict[str, Any]) -> None:
         add_setswitch_tokens=interface == "setswitch",
     )
     model = maybe_apply_lora(model, model_cfg)
-    trainable_token_ids = (
-        list(token_id_map(tokenizer).values()) if interface == "setswitch" else None
+    setswitch_token_ids = (
+        active_token_id_map(tokenizer, cfg.get("data", {})) if interface == "setswitch" else None
     )
+    trainable_token_ids = list(setswitch_token_ids.values()) if setswitch_token_ids else None
     model = apply_trainable_parameter_policy(model, model_cfg, trainable_token_ids)
+    configure_special_token_lr_multipliers(model, setswitch_token_ids, train_cfg)
 
     train_examples = _load_examples(cfg, "train")
     val_examples = _load_examples(cfg, "val")
@@ -212,6 +273,8 @@ def train_from_config(cfg: dict[str, Any]) -> None:
         collator = SetSwitchCollator(
             tokenizer=tokenizer,
             attention_mode=mask_cfg.get("doc_attention", "doc_causal"),
+            answer_attends_raw_docs=bool(mask_cfg.get("answer_attends_raw_docs", False)),
+            answer_attends_reads=bool(mask_cfg.get("answer_attends_reads", False)),
             mask_dtype=custom_mask_dtype,
         )
     elif interface == "setllm":
@@ -232,10 +295,21 @@ def train_from_config(cfg: dict[str, Any]) -> None:
         collate_fn=collator,
     )
 
+    learning_rate = float(train_cfg.get("learning_rate", 1e-4))
+    weight_decay = float(train_cfg.get("weight_decay", 0.0))
+    special_token_learning_rate = train_cfg.get("special_token_learning_rate")
+    special_token_learning_rate = (
+        float(special_token_learning_rate)
+        if special_token_learning_rate is not None
+        else None
+    )
     optimizer = AdamW(
-        (param for param in model.parameters() if param.requires_grad),
-        lr=float(train_cfg.get("learning_rate", 1e-4)),
-        weight_decay=float(train_cfg.get("weight_decay", 0.0)),
+        optimizer_param_groups(
+            model,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            special_token_learning_rate=special_token_learning_rate,
+        )
     )
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
@@ -268,12 +342,17 @@ def train_from_config(cfg: dict[str, Any]) -> None:
         max_steps=max_steps,
         grad_accum_steps=grad_accum_steps,
         batch_size=int(train_cfg.get("batch_size", 1)),
-        learning_rate=float(train_cfg.get("learning_rate", 1e-4)),
+        learning_rate=learning_rate,
+        special_token_learning_rate=special_token_learning_rate,
         custom_mask_dtype=str(custom_mask_dtype).replace("torch.", ""),
     )
 
     model.train()
     running_loss = 0.0
+    running_active_tokens = 0
+    running_padded_tokens = 0
+    running_examples = 0
+    running_log_start = time.perf_counter()
     optimizer.zero_grad(set_to_none=True)
     progress = tqdm(range(max_steps), disable=not accelerator.is_local_main_process)
     train_iter = infinite_dataloader(train_loader)
@@ -281,6 +360,12 @@ def train_from_config(cfg: dict[str, Any]) -> None:
     for step in progress:
         for _ in range(grad_accum_steps):
             batch = next(train_iter)
+            running_padded_tokens += int(batch["input_ids"].numel())
+            running_examples += int(batch["input_ids"].shape[0])
+            if "pad_mask" in batch:
+                running_active_tokens += int(batch["pad_mask"].sum().item())
+            else:
+                running_active_tokens += int(batch["input_ids"].numel())
             model_batch = {
                 "input_ids": batch["input_ids"],
                 "attention_mask": batch["attention_mask"],
@@ -290,6 +375,11 @@ def train_from_config(cfg: dict[str, Any]) -> None:
             if "position_ids" in batch:
                 model_batch["position_ids"] = batch["position_ids"]
             outputs = model(**model_batch)
+            if not torch.isfinite(outputs.loss):
+                summary = _nonfinite_batch_summary(batch)
+                raise FloatingPointError(
+                    f"Non-finite loss at optimizer_step={step + 1}: {summary}"
+                )
             loss = outputs.loss / grad_accum_steps
             accelerator.backward(loss)
             running_loss += float(loss.detach().cpu())
@@ -302,14 +392,27 @@ def train_from_config(cfg: dict[str, Any]) -> None:
 
         if accelerator.is_local_main_process and (step + 1) % log_every == 0:
             avg_loss = running_loss / log_every
-            progress.set_postfix(loss=f"{avg_loss:.4f}")
+            elapsed = max(time.perf_counter() - running_log_start, 1.0e-6)
+            active_tokens_per_second = running_active_tokens / elapsed
+            padded_tokens_per_second = running_padded_tokens / elapsed
+            avg_active_tokens = running_active_tokens / max(running_examples, 1)
+            avg_padded_tokens = running_padded_tokens / max(running_examples, 1)
+            progress.set_postfix(loss=f"{avg_loss:.4f}", tok_s=f"{active_tokens_per_second:.0f}")
             metric_logger.log(
                 event="train",
                 step=step + 1,
                 loss=avg_loss,
                 learning_rate=float(scheduler.get_last_lr()[0]),
+                active_tokens_per_second=active_tokens_per_second,
+                padded_tokens_per_second=padded_tokens_per_second,
+                avg_active_tokens_per_example=avg_active_tokens,
+                avg_padded_tokens_per_example=avg_padded_tokens,
             )
             running_loss = 0.0
+            running_active_tokens = 0
+            running_padded_tokens = 0
+            running_examples = 0
+            running_log_start = time.perf_counter()
 
         if eval_every and (step + 1) % eval_every == 0:
             val_loss = evaluate_answer_ce(model, val_loader, max_batches=10)

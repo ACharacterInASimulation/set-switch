@@ -60,6 +60,10 @@ def main() -> None:
             rendered["read_slot_ids"],
             rendered["gather_slot_ids"],
             attention_mode=cfg.get("mask", {}).get("doc_attention", "doc_causal"),
+            answer_attends_raw_docs=bool(
+                cfg.get("mask", {}).get("answer_attends_raw_docs", False)
+            ),
+            answer_attends_reads=bool(cfg.get("mask", {}).get("answer_attends_reads", False)),
         )
     allowed = (mask[0, 0] == 0).int()
     print(allowed.numpy())

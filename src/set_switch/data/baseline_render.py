@@ -68,7 +68,7 @@ def render_baseline_prompt_text(
         docs.append(f"{item_name}:\n{text}")
 
     return (
-        f"{example.instruction}\n\n"
+        f"Instruction: {example.instruction}\n\n"
         f"Question: {example.question}\n\n"
         f"{set_name}:\n" + "\n\n".join(docs) + f"\n\n{final_instruction}"
     )

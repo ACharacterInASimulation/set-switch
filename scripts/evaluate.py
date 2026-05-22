@@ -40,6 +40,10 @@ def _normalize_answer(text: Any) -> str:
     return " ".join(text.split())
 
 
+def _answer_tokens(text: Any) -> list[str]:
+    return _normalize_answer(text).split()
+
+
 def _answers(example: SetSwitchExample) -> list[str]:
     raw = example.metadata.get("golden_answers")
     if isinstance(raw, list):
@@ -61,6 +65,144 @@ def _matches(prediction: str, answers: list[str]) -> bool:
         if gold and pred.startswith(gold + " "):
             return True
     return False
+
+
+def _token_f1(prediction: str, answers: list[str]) -> float:
+    pred_tokens = _answer_tokens(prediction.splitlines()[0] if prediction else prediction)
+    if not pred_tokens:
+        return 0.0
+    best = 0.0
+    for answer in answers:
+        gold_tokens = _answer_tokens(answer)
+        if not gold_tokens:
+            continue
+        common = set(pred_tokens) & set(gold_tokens)
+        overlap = sum(min(pred_tokens.count(token), gold_tokens.count(token)) for token in common)
+        if overlap == 0:
+            continue
+        precision = overlap / len(pred_tokens)
+        recall = overlap / len(gold_tokens)
+        best = max(best, 2 * precision * recall / (precision + recall))
+    return best
+
+
+def _lcs_length(left: list[str], right: list[str]) -> int:
+    if not left or not right:
+        return 0
+    previous = [0] * (len(right) + 1)
+    for left_token in left:
+        current = [0]
+        for idx, right_token in enumerate(right, start=1):
+            if left_token == right_token:
+                current.append(previous[idx - 1] + 1)
+            else:
+                current.append(max(previous[idx], current[-1]))
+        previous = current
+    return previous[-1]
+
+
+def _rouge_l(prediction: str, answers: list[str]) -> float:
+    pred_tokens = _answer_tokens(prediction.splitlines()[0] if prediction else prediction)
+    if not pred_tokens:
+        return 0.0
+    best = 0.0
+    for answer in answers:
+        gold_tokens = _answer_tokens(answer)
+        if not gold_tokens:
+            continue
+        lcs = _lcs_length(pred_tokens, gold_tokens)
+        if lcs == 0:
+            continue
+        precision = lcs / len(pred_tokens)
+        recall = lcs / len(gold_tokens)
+        best = max(best, 2 * precision * recall / (precision + recall))
+    return best
+
+
+def _primary_metric_for_example(example: SetSwitchExample) -> str:
+    source = example.source.removeprefix("flashrag_")
+    if example.metadata.get("set_type") == "options" or task_group_for_source(source) == "normal_mcq":
+        return "accuracy"
+    if source == "boolq":
+        return "accuracy"
+    if source == "msmarco-qa":
+        return "rouge_l"
+    return "token_f1"
+
+
+def score_prediction(example: SetSwitchExample, prediction: str) -> dict[str, Any]:
+    answers = _answers(example)
+    exact = _matches(prediction, answers)
+    f1 = _token_f1(prediction, answers)
+    rouge_l = _rouge_l(prediction, answers)
+    primary_metric = _primary_metric_for_example(example)
+    metric_values = {
+        "accuracy": float(exact),
+        "token_f1": f1,
+        "rouge_l": rouge_l,
+    }
+    primary_score = metric_values[primary_metric]
+    return {
+        "primary_metric": primary_metric,
+        "primary_score": primary_score,
+        "exact_match": float(exact),
+        "token_f1": f1,
+        "rouge_l": rouge_l,
+        "correct": bool(exact),
+    }
+
+
+METRIC_POLICY = {
+    "normal_mcq": "normalized exact-match accuracy over option text",
+    "options": "normalized exact-match accuracy over option text",
+    "boolq": "normalized yes/no accuracy",
+    "msmarco-qa": "max normalized ROUGE-L F1 over golden answers, with EM/F1 also logged",
+    "qa": "max normalized token F1 over golden answers, with exact_match also logged",
+}
+
+
+def _empty_count() -> dict[str, float]:
+    return {
+        "correct": 0.0,
+        "total": 0.0,
+        "score_sum": 0.0,
+        "exact_sum": 0.0,
+        "f1_sum": 0.0,
+        "rouge_l_sum": 0.0,
+        "movable_total": 0.0,
+    }
+
+
+def _update_count(
+    counts: dict[str, dict[str, float]],
+    key: str,
+    score: dict[str, Any],
+    sweep_status: dict[str, int | bool],
+) -> None:
+    counts[key]["correct"] += int(score["correct"])
+    counts[key]["total"] += 1
+    counts[key]["score_sum"] += float(score["primary_score"])
+    counts[key]["exact_sum"] += float(score["exact_match"])
+    counts[key]["f1_sum"] += float(score["token_f1"])
+    counts[key]["rouge_l_sum"] += float(score["rouge_l"])
+    counts[key]["movable_total"] += int(bool(sweep_status["gold_sweep_movable"]))
+
+
+def _summarize_counts(counts: dict[str, dict[str, float]]) -> dict[str, dict[str, float | int]]:
+    return {
+        key: {
+            "primary_score": value["score_sum"] / max(1, value["total"]),
+            "accuracy": value["correct"] / max(1, value["total"]),
+            "exact_match": value["exact_sum"] / max(1, value["total"]),
+            "token_f1": value["f1_sum"] / max(1, value["total"]),
+            "rouge_l": value["rouge_l_sum"] / max(1, value["total"]),
+            "correct": int(value["correct"]),
+            "total": int(value["total"]),
+            "movable_total": int(value["movable_total"]),
+            "movable_fraction": value["movable_total"] / max(1, value["total"]),
+        }
+        for key, value in sorted(counts.items())
+    }
 
 
 def place_gold_documents(example: SetSwitchExample, fraction: float) -> SetSwitchExample:
@@ -199,6 +341,10 @@ def _greedy_setswitch(
             read_slot_ids=reads,
             gather_slot_ids=gathers,
             attention_mode=cfg.get("mask", {}).get("doc_attention", "doc_causal"),
+            answer_attends_raw_docs=bool(
+                cfg.get("mask", {}).get("answer_attends_raw_docs", False)
+            ),
+            answer_attends_reads=bool(cfg.get("mask", {}).get("answer_attends_reads", False)),
             dtype=mask_dtype,
             device=device,
         )
@@ -369,11 +515,14 @@ def main() -> None:
     model.eval()
 
     examples = _load_eval_examples(cfg, split, max_examples)
-    counts: dict[str, dict[str, int]] = defaultdict(lambda: {"correct": 0, "total": 0})
+    task_counts: dict[str, dict[str, float]] = defaultdict(_empty_count)
+    source_counts: dict[str, dict[str, float]] = defaultdict(_empty_count)
+    overall_counts: dict[str, dict[str, float]] = defaultdict(_empty_count)
     rows = []
 
     for example in examples:
         task = example.metadata.get("task_group") or task_group_for_source(example.source)
+        source = example.source.removeprefix("flashrag_")
         sweep_status = gold_sweep_status(example)
         for fraction in gold_positions:
             placed = place_gold_documents(example, fraction)
@@ -386,39 +535,37 @@ def main() -> None:
                 cfg=cfg,
                 max_new_tokens=max_new_tokens,
             )
-            correct = _matches(prediction, _answers(example))
-            key = f"{task}@{fraction:g}"
-            counts[key]["correct"] += int(correct)
-            counts[key]["total"] += 1
-            counts[key]["movable_total"] += int(bool(sweep_status["gold_sweep_movable"]))
+            score = score_prediction(example, prediction)
+            _update_count(task_counts, f"{task}@{fraction:g}", score, sweep_status)
+            _update_count(source_counts, f"{source}@{fraction:g}", score, sweep_status)
+            _update_count(overall_counts, f"overall@{fraction:g}", score, sweep_status)
             rows.append(
                 {
                     "example_id": example.example_id,
+                    "source": example.source,
+                    "source_config": source,
                     "task_group": task,
                     "gold_position": fraction,
                     "prediction": prediction,
                     "answers": _answers(example),
-                    "correct": correct,
+                    **score,
                     **sweep_status,
                 }
             )
 
-    summary = {
-        key: {
-            "accuracy": value["correct"] / max(1, value["total"]),
-            "correct": value["correct"],
-            "total": value["total"],
-            "movable_total": value["movable_total"],
-            "movable_fraction": value["movable_total"] / max(1, value["total"]),
-        }
-        for key, value in sorted(counts.items())
-    }
+    summary = _summarize_counts(task_counts)
+    source_summary = _summarize_counts(source_counts)
+    overall_summary = _summarize_counts(overall_counts)
     report = {
         "interface": interface,
         "split": split,
         "max_examples": max_examples,
         "gold_positions": gold_positions,
+        "metric_policy": METRIC_POLICY,
         "summary": summary,
+        "task_summary": summary,
+        "source_summary": source_summary,
+        "overall_summary": overall_summary,
         "rows": rows,
     }
 
@@ -428,7 +575,16 @@ def main() -> None:
     output_path = Path(_format_output_path(output_template, cfg, interface, split))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(json.dumps(summary, indent=2))
+    print(
+        json.dumps(
+            {
+                "task_summary": summary,
+                "source_summary": source_summary,
+                "overall_summary": overall_summary,
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":
