@@ -2,7 +2,7 @@ project_name: set-switch
 run_name: qwen3_4b_setswitch
 seed: 42
 
-# choices: setswitch, chat_baseline, setllm
+# choices: setswitch, chat_baseline, setllm, setfuse
 # You can also override this at launch:
 #   accelerate launch scripts/train.py --config configs/flashrag.yaml --interface setllm
 model_interface: setswitch
@@ -60,6 +60,21 @@ method_overrides:
       lora_alpha: 1
       lora_dropout: 0.0
       lora_target_modules: all-linear
+    train:
+      learning_rate: 0.0003
+  setfuse:
+    run_name: qwen3_4b_setfuse_lora
+    model:
+      # SetFuse-LM uses layer-scheduled custom 4D masks, so eager attention is
+      # the dense correctness backend.
+      attn_implementation: eager
+      use_lora: true
+      lora_r: 8
+      lora_alpha: 1
+      lora_dropout: 0.0
+      lora_target_modules: all-linear
+    data:
+      setfuse_answer_prefix: "\nAnswer:\n"
     train:
       learning_rate: 0.0003
 
@@ -147,12 +162,18 @@ data:
   setswitch_answer_prefix: "\nAnswer:\n"
   append_eos_token: true
   setllm_append_eos_token: true
-  instruction: "Use the provided passages or options to answer the question. Treat the items as an unordered set."
+  instruction: "Use the provided passages or options to answer the question."
 
 mask:
+  # Build dense custom 4D masks after Accelerator places compact metadata on
+  # the training device. This avoids transferring O(T^2) masks from CPU to GPU.
+  build_on_device: true
   doc_attention: doc_causal
   answer_attends_raw_docs: false
   answer_attends_reads: false
+  fuse_start_layer: auto_half
+  setfuse_answer_attends_docs_in_early_layers: false
+  setfuse_late_prefix_doc_bidir: true
 
 train:
   max_steps: 5000
@@ -164,6 +185,7 @@ train:
   weight_decay: 0.0
   max_grad_norm: 1.0
   mixed_precision: bf16
+  gradient_checkpointing: true
   local_logging: true
   metrics_file: metrics.jsonl
   log_every: 10
@@ -175,6 +197,7 @@ eval:
   split: dev
   max_examples: 1000
   max_new_tokens: 32
+  mcq_scoring: logprob
   gold_positions: [0.0, 0.25, 0.5, 0.75, 1.0]
   # For the causal decoder only, MCQ examples are evaluated under several random
   # option permutations and also with per-example majority vote.

@@ -8,9 +8,10 @@ from typing import Any
 from set_switch.data.baseline_render import render_chat_baseline_example
 from set_switch.data.render import render_example
 from set_switch.data.schema import SetSwitchExample
+from set_switch.data.setfuse_render import render_setfuse_example
 from set_switch.data.setllm_render import render_setllm_example
 
-LENGTH_FILTER_INTERFACES = ("setswitch", "setllm", "chat_baseline")
+LENGTH_FILTER_INTERFACES = ("chat_baseline", "setllm", "setswitch", "setfuse")
 
 
 def normalize_length_filter_interfaces(value: Any, default: str = "all") -> tuple[str, ...]:
@@ -49,6 +50,8 @@ def rendered_length(
         return len(render_setllm_example(example, tokenizer, render_cfg)["input_ids"])
     if interface == "chat_baseline":
         return len(render_chat_baseline_example(example, tokenizer, render_cfg)["input_ids"])
+    if interface == "setfuse":
+        return len(render_setfuse_example(example, tokenizer, render_cfg)["input_ids"])
     raise ValueError(f"Unknown interface {interface!r}")
 
 

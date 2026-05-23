@@ -122,7 +122,7 @@ def tokenizer() -> SimpleTokenizer:
 def example() -> SetSwitchExample:
     return SetSwitchExample(
         example_id="example-0",
-        instruction="Use the provided documents to answer the question. Treat the documents as an unordered set.",
+        instruction="Use the provided documents to answer the question.",
         question="What is the launch year of project NARU-17?",
         documents=[
             SetSwitchDocument("d0", "Project LOMA-42 has launch year 1986.", False),
@@ -144,7 +144,7 @@ def make_fixture_example(idx: int = 0) -> SetSwitchExample:
     ]
     return SetSwitchExample(
         example_id=f"fixture-{idx}",
-        instruction="Use the provided passages or options to answer the question. Treat the items as an unordered set.",
+        instruction="Use the provided passages or options to answer the question.",
         question=f"What is the launch year of project {target}?",
         documents=documents,
         answer=year,

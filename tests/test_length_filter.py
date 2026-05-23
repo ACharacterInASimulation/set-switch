@@ -47,8 +47,9 @@ def test_length_filter_uses_rendered_lengths(tokenizer):
 
 def test_normalize_length_filter_interfaces():
     assert normalize_length_filter_interfaces("all") == (
-        "setswitch",
-        "setllm",
         "chat_baseline",
+        "setllm",
+        "setswitch",
+        "setfuse",
     )
     assert normalize_length_filter_interfaces("setswitch,setllm") == ("setswitch", "setllm")

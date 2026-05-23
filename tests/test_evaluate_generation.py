@@ -11,6 +11,8 @@ import torch
 
 from set_switch.data.render import render_example
 from set_switch.data.schema import SetSwitchDocument, SetSwitchExample
+from set_switch.data.setfuse_render import render_setfuse_example
+from set_switch.data.baseline_render import render_chat_baseline_example
 from set_switch.modeling.special_tokens import add_setswitch_special_tokens
 
 _EVALUATE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "evaluate.py"
@@ -19,15 +21,19 @@ assert _SPEC is not None and _SPEC.loader is not None
 _EVALUATE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_EVALUATE)
 _greedy_setswitch = _EVALUATE._greedy_setswitch
+_greedy_setfuse = _EVALUATE._greedy_setfuse
 gold_sweep_status = _EVALUATE.gold_sweep_status
 gold_position_sweep_enabled = _EVALUATE.gold_position_sweep_enabled
 option_permutation_sweep_enabled = _EVALUATE.option_permutation_sweep_enabled
 permute_option_documents = _EVALUATE.permute_option_documents
+_include_in_reported_summary = _EVALUATE._include_in_reported_summary
 _majority_prediction = _EVALUATE._majority_prediction
 _summarize_option_counts = _EVALUATE._summarize_option_counts
 _update_option_summary_count = _EVALUATE._update_option_summary_count
 load_eval_tokenizer_and_model = _EVALUATE.load_eval_tokenizer_and_model
 score_prediction = _EVALUATE.score_prediction
+score_mcq_options = _EVALUATE.score_mcq_options
+_load_eval_examples = _EVALUATE._load_eval_examples
 
 
 class RecordingGreedyModel:
@@ -37,6 +43,7 @@ class RecordingGreedyModel:
         self.vocab_size = vocab_size
         self.param = torch.nn.Parameter(torch.zeros(1))
         self.position_calls: list[torch.Tensor] = []
+        self.attention_mask_calls: list[torch.Tensor] = []
 
     def parameters(self):
         yield self.param
@@ -44,6 +51,7 @@ class RecordingGreedyModel:
     def __call__(self, **kwargs):
         position_ids = kwargs["position_ids"].detach().cpu()
         self.position_calls.append(position_ids)
+        self.attention_mask_calls.append(kwargs["attention_mask"].detach().cpu())
         seq_len = int(kwargs["input_ids"].shape[1])
         logits = torch.zeros((1, seq_len, self.vocab_size), device=kwargs["input_ids"].device)
         next_id = self.first_token_id if len(self.position_calls) == 1 else self.eos_token_id
@@ -71,6 +79,26 @@ def test_setswitch_greedy_generation_uses_training_answer_positions(tokenizer, e
     assert int(model.position_calls[1][0, -1]) == first_answer_pos
 
 
+def test_setfuse_greedy_generation_rebuilds_masks_and_decodes_answer_only(tokenizer, example):
+    rendered = render_setfuse_example(example, tokenizer)
+    first_answer_pos = rendered["position_ids"][rendered["answer_start"]]
+    model = RecordingGreedyModel(first_token_id=2, eos_token_id=int(tokenizer.eos_token_id))
+
+    prediction = _greedy_setfuse(
+        model=model,
+        tokenizer=tokenizer,
+        rendered=rendered,
+        cfg={"mask": {"fuse_start_layer": "auto_half"}},
+        max_new_tokens=2,
+    )
+
+    assert prediction == tokenizer.decode([2])
+    assert len(model.position_calls) == 2
+    assert model.attention_mask_calls[0].shape[-1] == rendered["answer_start"]
+    assert model.attention_mask_calls[1].shape[-1] == rendered["answer_start"] + 1
+    assert int(model.position_calls[1][0, -1]) == first_answer_pos
+
+
 def test_gold_sweep_status_reports_unmovable_examples():
     example = SetSwitchExample(
         example_id="no-gold",
@@ -95,12 +123,26 @@ def test_only_causal_baseline_uses_explicit_gold_position_sweep():
     assert gold_position_sweep_enabled("chat_baseline") is True
     assert gold_position_sweep_enabled("setllm") is False
     assert gold_position_sweep_enabled("setswitch") is False
+    assert gold_position_sweep_enabled("setfuse") is False
 
 
 def test_only_causal_baseline_uses_option_permutation_sweep():
     assert option_permutation_sweep_enabled("chat_baseline") is True
     assert option_permutation_sweep_enabled("setllm") is False
     assert option_permutation_sweep_enabled("setswitch") is False
+    assert option_permutation_sweep_enabled("setfuse") is False
+
+
+def test_invariant_reported_summary_counts_each_example_once():
+    included = [
+        _include_in_reported_summary(
+            row_index=idx,
+            sweep_gold_positions=False,
+            sweep_option_order=False,
+        )
+        for idx in range(5)
+    ]
+    assert included == [True, False, False, False, False]
 
 
 def test_option_permutation_is_seeded_and_preserves_choices():
@@ -146,6 +188,48 @@ def test_option_permutation_summary_reports_majority_vote_accuracy():
     assert summary["overall"]["all_permutations_accuracy"] == 0.0
 
 
+def test_mcq_logprob_scoring_selects_best_length_normalized_option(tokenizer):
+    example = SetSwitchExample(
+        example_id="mcq",
+        instruction="Use docs.",
+        question="Q?",
+        documents=[
+            SetSwitchDocument("d0", "Candidate answer: red", False, {"choice_text": "red"}),
+            SetSwitchDocument("d1", "Candidate answer: blue", True, {"choice_text": "blue"}),
+        ],
+        answer="blue",
+        source="flashrag_arc",
+        metadata={"set_type": "options", "golden_answers": ["blue"]},
+    )
+    rendered = render_chat_baseline_example(example, tokenizer)
+    blue_id = tokenizer.encode("blue", add_special_tokens=False)[0]
+
+    class BlueModel:
+        def __init__(self):
+            self.param = torch.nn.Parameter(torch.zeros(1))
+
+        def parameters(self):
+            yield self.param
+
+        def __call__(self, **kwargs):
+            seq_len = int(kwargs["input_ids"].shape[1])
+            logits = torch.zeros((1, seq_len, 128), device=kwargs["input_ids"].device)
+            logits[:, :, blue_id] = 5.0
+            return SimpleNamespace(logits=logits)
+
+    result = score_mcq_options(
+        interface="chat_baseline",
+        model=BlueModel(),
+        tokenizer=tokenizer,
+        rendered=rendered,
+        option_texts=["red", "blue"],
+        cfg={"model": {}, "train": {}},
+    )
+
+    assert result["prediction"] == "blue"
+    assert result["score_key"] == "length_normalized_logprob"
+
+
 def test_eval_loads_peft_adapter_checkpoint_from_base_model(monkeypatch, tmp_path):
     adapter_config = {"base_model_name_or_path": "base-model-from-adapter"}
     (tmp_path / "adapter_config.json").write_text(json.dumps(adapter_config), encoding="utf-8")
@@ -181,6 +265,37 @@ def test_eval_loads_peft_adapter_checkpoint_from_base_model(monkeypatch, tmp_pat
     assert calls["add_setswitch_tokens"] is False
     assert calls["adapter_model"] == "base-model"
     assert calls["adapter_checkpoint"] == str(tmp_path)
+
+
+def test_eval_loads_fixed_dev_jsonl(tmp_path, example):
+    path = tmp_path / "dev.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "example_id": example.example_id,
+                "instruction": example.instruction,
+                "question": example.question,
+                "documents": [
+                    {
+                        "doc_id": doc.doc_id,
+                        "text": doc.text,
+                        "is_gold": doc.is_gold,
+                        "metadata": doc.metadata,
+                    }
+                    for doc in example.documents
+                ],
+                "answer": example.answer,
+                "source": example.source,
+                "metadata": example.metadata,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    loaded = _load_eval_examples({"data": {"dev_jsonl": str(path)}}, split="dev", max_examples=1)
+
+    assert [item.example_id for item in loaded] == [example.example_id]
 
 
 def test_eval_uses_accuracy_for_options_and_f1_for_qa():

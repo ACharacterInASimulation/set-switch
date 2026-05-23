@@ -6,23 +6,29 @@ from __future__ import annotations
 import argparse
 
 from transformers import AutoTokenizer
+from tqdm import tqdm
 
+from set_switch.config_validation import validate_config
 from set_switch.data.dataset_suite import (
-    load_flashrag_selected_examples,
+    iter_flashrag_selected_examples,
     normalize_flashrag_sources,
 )
 from set_switch.data.length_filter import (
     max_rendered_length,
     normalize_length_filter_interfaces,
 )
-from set_switch.modeling.special_tokens import add_setswitch_special_tokens, ensure_tokenizer_has_pad_token
+from set_switch.modeling.special_tokens import (
+    add_setswitch_special_tokens,
+    ensure_tokenizer_has_pad_token,
+)
 from set_switch.utils.io import read_yaml, write_examples_jsonl
 
 
-def _load_length_filter_tokenizer(cfg: dict):
+def _load_length_filter_tokenizer(cfg: dict, add_setswitch_tokens_for_filter: bool):
     tokenizer = AutoTokenizer.from_pretrained(cfg["model"]["name_or_path"], use_fast=True)
     ensure_tokenizer_has_pad_token(tokenizer)
-    add_setswitch_special_tokens(tokenizer, None)
+    if add_setswitch_tokens_for_filter:
+        add_setswitch_special_tokens(tokenizer, None)
     return tokenizer
 
 
@@ -34,15 +40,17 @@ def main() -> None:
     parser.add_argument("--max-render-tokens", type=int)
     parser.add_argument("--length-filter-interfaces", default=None)
     parser.add_argument("--no-length-filter", action="store_true")
+    parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
     cfg = read_yaml(args.config)
+    validate_config(cfg)
     data_cfg = cfg.get("data", {})
     if data_cfg.get("source", "flashrag") != "flashrag":
         raise ValueError("Only data.source='flashrag' is supported")
     instruction = data_cfg.get(
         "instruction",
-        "Use the provided passages or options to answer the question. Treat the items as an unordered set.",
+        "Use the provided passages or options to answer the question.",
     )
     total_key = "total_train_examples" if args.split == "train" else "total_val_examples"
     max_render_tokens = (
@@ -55,11 +63,17 @@ def main() -> None:
     )
     dropped = 0
     example_filter = None
+    interfaces = None
     if apply_length_filter:
         max_render_tokens = int(max_render_tokens)
-        tokenizer = _load_length_filter_tokenizer(cfg)
         interfaces = normalize_length_filter_interfaces(
             args.length_filter_interfaces or data_cfg.get("length_filter_interfaces", "all")
+        )
+        if "setfuse" not in interfaces:
+            interfaces = (*interfaces, "setfuse")
+        tokenizer = _load_length_filter_tokenizer(
+            cfg,
+            add_setswitch_tokens_for_filter="setswitch" in interfaces,
         )
 
         def example_filter(example):
@@ -76,15 +90,44 @@ def main() -> None:
             dropped += int(not keep)
             return keep
 
-    examples = load_flashrag_selected_examples(
+    selections = normalize_flashrag_sources(data_cfg, args.split)
+    if args.verbose:
+        print(
+            "Preparing dataset suite: "
+            f"split={args.split} output={args.output} "
+            f"target={data_cfg.get(total_key)} max_docs={data_cfg.get('max_docs', 8)}"
+        )
+        print(
+            "Sources: "
+            + ", ".join(
+                f"{selection.name}[{selection.split}]"
+                + (f":{selection.max_examples}" if selection.max_examples is not None else "")
+                for selection in selections
+            )
+        )
+        if apply_length_filter:
+            print(
+                "Length filter: "
+                f"max_render_tokens={max_render_tokens} interfaces={','.join(interfaces or ())}"
+            )
+
+    iterator = iter_flashrag_selected_examples(
         dataset_name=data_cfg.get("dataset_name", "RUC-NLPIR/FlashRAG_datasets"),
-        selections=normalize_flashrag_sources(data_cfg, args.split),
+        selections=selections,
         max_docs=int(data_cfg.get("max_docs", 8)),
         instruction=instruction,
         total_examples=data_cfg.get(total_key),
         sample_allocation=data_cfg.get("sample_allocation", "task_balanced_equal"),
         sample_allocation_alpha=float(data_cfg.get("sample_allocation_alpha", 0.5)),
         example_filter=example_filter,
+    )
+    examples = list(
+        tqdm(
+            iterator,
+            total=data_cfg.get(total_key),
+            desc=f"Building {args.split}",
+            disable=not args.verbose,
+        )
     )
 
     write_examples_jsonl(args.output, examples)

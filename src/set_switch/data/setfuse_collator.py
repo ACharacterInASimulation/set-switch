@@ -1,4 +1,4 @@
-"""Batch collation for Set-LLM rendered examples."""
+"""Batch collation for SetFuse-LM rendered examples."""
 
 from __future__ import annotations
 
@@ -9,14 +9,16 @@ from typing import Any
 import torch
 
 from set_switch.constants import IGNORE_INDEX, ROLE_PAD
-from set_switch.modeling.setllm import build_setllm_attention_mask
+from set_switch.modeling.setfuse_attention_mask import build_setfuse_layer_masks
 
 
 @dataclass
-class SetLLMCollator:
+class SetFuseCollator:
     tokenizer: Any
     mask_dtype: torch.dtype = torch.float32
     pad_to_multiple_of: int | None = None
+    setfuse_answer_attends_docs_in_early_layers: bool = False
+    setfuse_late_prefix_doc_bidir: bool = True
     build_attention_mask: bool = True
 
     def __call__(self, features: Sequence[dict[str, Any]]) -> dict[str, Any]:
@@ -39,9 +41,10 @@ class SetLLMCollator:
             "position_ids": [],
             "pad_mask": [],
             "answer_start": [],
+            "prefix_length": [],
+            "max_doc_length": [],
             "example_id": [],
         }
-
         for feature in features:
             length = len(feature["input_ids"])
             pad_len = max_len - length
@@ -54,12 +57,13 @@ class SetLLMCollator:
             batch["position_ids"].append(feature["position_ids"] + [0] * pad_len)
             batch["pad_mask"].append([True] * length + [False] * pad_len)
             batch["answer_start"].append(int(feature["answer_start"]))
+            batch["prefix_length"].append(int(feature["prefix_length"]))
+            batch["max_doc_length"].append(int(feature["max_doc_length"]))
             batch["example_id"].append(feature.get("example_id", ""))
 
         role_ids = torch.tensor(batch["role_ids"], dtype=torch.long)
         item_ids = torch.tensor(batch["item_ids"], dtype=torch.long)
         pad_mask = torch.tensor(batch["pad_mask"], dtype=torch.bool)
-
         output = {
             "input_ids": torch.tensor(batch["input_ids"], dtype=torch.long),
             "labels": torch.tensor(batch["labels"], dtype=torch.long),
@@ -68,13 +72,21 @@ class SetLLMCollator:
             "item_ids": item_ids,
             "pad_mask": pad_mask,
             "answer_start": torch.tensor(batch["answer_start"], dtype=torch.long),
+            "prefix_length": torch.tensor(batch["prefix_length"], dtype=torch.long),
+            "max_doc_length": torch.tensor(batch["max_doc_length"], dtype=torch.long),
             "example_id": batch["example_id"],
         }
         if self.build_attention_mask:
-            output["attention_mask"] = build_setllm_attention_mask(
+            layer_masks = build_setfuse_layer_masks(
                 role_ids=role_ids,
                 item_ids=item_ids,
                 pad_mask=pad_mask,
                 dtype=self.mask_dtype,
+                setfuse_answer_attends_docs_in_early_layers=(
+                    self.setfuse_answer_attends_docs_in_early_layers
+                ),
+                setfuse_late_prefix_doc_bidir=self.setfuse_late_prefix_doc_bidir,
             )
+            output["attention_mask_early"] = layer_masks["early"]
+            output["attention_mask_late"] = layer_masks["late"]
         return output

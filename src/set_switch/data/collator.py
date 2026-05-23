@@ -20,6 +20,7 @@ class SetSwitchCollator:
     answer_attends_reads: bool = False
     mask_dtype: torch.dtype = torch.float32
     pad_to_multiple_of: int | None = None
+    build_attention_mask: bool = True
 
     def __call__(self, features: Sequence[dict[str, Any]]) -> dict[str, Any]:
         if not features:
@@ -68,22 +69,9 @@ class SetSwitchCollator:
         gather_slot_ids = torch.tensor(batch["gather_slot_ids"], dtype=torch.long)
         pad_mask = torch.tensor(batch["pad_mask"], dtype=torch.bool)
 
-        attention_mask = build_setswitch_attention_mask(
-            role_ids=role_ids,
-            item_ids=item_ids,
-            read_slot_ids=read_slot_ids,
-            gather_slot_ids=gather_slot_ids,
-            attention_mode=self.attention_mode,
-            answer_attends_raw_docs=self.answer_attends_raw_docs,
-            answer_attends_reads=self.answer_attends_reads,
-            pad_mask=pad_mask,
-            dtype=self.mask_dtype,
-        )
-
-        return {
+        output = {
             "input_ids": torch.tensor(batch["input_ids"], dtype=torch.long),
             "labels": torch.tensor(batch["labels"], dtype=torch.long),
-            "attention_mask": attention_mask,
             "position_ids": torch.tensor(batch["position_ids"], dtype=torch.long),
             "role_ids": role_ids,
             "item_ids": item_ids,
@@ -93,3 +81,16 @@ class SetSwitchCollator:
             "answer_start": torch.tensor(batch["answer_start"], dtype=torch.long),
             "example_id": batch["example_id"],
         }
+        if self.build_attention_mask:
+            output["attention_mask"] = build_setswitch_attention_mask(
+                role_ids=role_ids,
+                item_ids=item_ids,
+                read_slot_ids=read_slot_ids,
+                gather_slot_ids=gather_slot_ids,
+                attention_mode=self.attention_mode,
+                answer_attends_raw_docs=self.answer_attends_raw_docs,
+                answer_attends_reads=self.answer_attends_reads,
+                pad_mask=pad_mask,
+                dtype=self.mask_dtype,
+            )
+        return output

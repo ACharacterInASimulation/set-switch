@@ -11,6 +11,7 @@ from set_switch.constants import ROLE_NAMES
 from set_switch.data.baseline_render import render_chat_baseline_example
 from set_switch.data.render import render_example
 from set_switch.data.schema import SetSwitchDocument, SetSwitchExample
+from set_switch.data.setfuse_render import render_setfuse_example
 from set_switch.data.setllm_render import render_setllm_example
 from set_switch.modeling.special_tokens import add_setswitch_special_tokens
 from set_switch.utils.io import read_examples_jsonl, read_yaml
@@ -20,7 +21,7 @@ def fixture_example(index: int = 0) -> SetSwitchExample:
     del index
     return SetSwitchExample(
         example_id="inspect-fixture",
-        instruction="Use the provided passages or options to answer the question. Treat the items as an unordered set.",
+        instruction="Use the provided passages or options to answer the question.",
         question="What is the launch year of project NARU-17?",
         documents=[
             SetSwitchDocument("d0", "Project LOMA-42 has launch year 1986.", False),
@@ -45,7 +46,10 @@ def main() -> None:
     model_name = args.model or cfg.get("model", {}).get(
         "name_or_path", "HuggingFaceTB/SmolLM2-360M"
     )
-    interface = cfg.get("model_interface", "setswitch")
+    interface = cfg.get(
+        "model_interface",
+        cfg.get("interface", cfg.get("model", {}).get("interface", "setswitch")),
+    )
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     if interface == "setswitch":
         add_setswitch_special_tokens(tokenizer, None)
@@ -58,6 +62,8 @@ def main() -> None:
         rendered = render_example(example, tokenizer, cfg)
     elif interface == "setllm":
         rendered = render_setllm_example(example, tokenizer, cfg)
+    elif interface == "setfuse":
+        rendered = render_setfuse_example(example, tokenizer, cfg)
     elif interface == "chat_baseline":
         rendered = render_chat_baseline_example(example, tokenizer, cfg)
     else:

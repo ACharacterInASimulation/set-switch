@@ -29,10 +29,7 @@ from set_switch.utils.seed import set_seed
 def fixture_example() -> SetSwitchExample:
     return SetSwitchExample(
         example_id="sdpa-check",
-        instruction=(
-            "Use the provided passages or options to answer the question. "
-            "Treat the items as an unordered set."
-        ),
+        instruction=("Use the provided passages or options to answer the question."),
         question="What is the launch year of project NARU-17?",
         documents=[
             SetSwitchDocument("d0", "Project LOMA-42 has launch year 1986.", False),

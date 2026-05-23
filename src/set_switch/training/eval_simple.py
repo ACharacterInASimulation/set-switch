@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from set_switch.data.collator import SetSwitchCollator
 from set_switch.data.render import render_example
 from set_switch.data.schema import SetSwitchExample
+from set_switch.modeling.layer_masking import set_setfuse_masks
 
 
 @torch.no_grad()
@@ -19,15 +20,29 @@ def evaluate_answer_ce(model: Any, dataloader: DataLoader, max_batches: int | No
     device = next(model.parameters()).device
     losses: list[float] = []
     for batch_idx, batch in enumerate(dataloader):
-        model_batch = {
-            "input_ids": batch["input_ids"].to(device),
-            "attention_mask": batch["attention_mask"].to(device),
-            "labels": batch["labels"].to(device),
-            "use_cache": False,
-        }
-        if "position_ids" in batch:
-            model_batch["position_ids"] = batch["position_ids"].to(device)
-        outputs = model(**model_batch)
+        if "attention_mask_early" in batch and "attention_mask_late" in batch:
+            early = batch["attention_mask_early"].to(device)
+            late = batch["attention_mask_late"].to(device)
+            model_batch = {
+                "input_ids": batch["input_ids"].to(device),
+                "attention_mask": early,
+                "labels": batch["labels"].to(device),
+                "use_cache": False,
+            }
+            if "position_ids" in batch:
+                model_batch["position_ids"] = batch["position_ids"].to(device)
+            with set_setfuse_masks(model, early, late):
+                outputs = model(**model_batch)
+        else:
+            model_batch = {
+                "input_ids": batch["input_ids"].to(device),
+                "attention_mask": batch["attention_mask"].to(device),
+                "labels": batch["labels"].to(device),
+                "use_cache": False,
+            }
+            if "position_ids" in batch:
+                model_batch["position_ids"] = batch["position_ids"].to(device)
+            outputs = model(**model_batch)
         losses.append(float(outputs.loss.detach().cpu()))
         if max_batches is not None and batch_idx + 1 >= max_batches:
             break

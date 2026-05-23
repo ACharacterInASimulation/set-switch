@@ -31,9 +31,7 @@ END_ITEM_TOKEN = "</item>"
 READ_TOKENS = [f"<read_{idx}>" for idx in range(8)]
 GATHER_TOKENS = [f"<gather_{idx}>" for idx in range(8)]
 
-DEFAULT_INSTRUCTION = (
-    "Use the provided documents to answer the question. Treat the documents as an unordered set."
-)
+DEFAULT_INSTRUCTION = "Use the provided documents to answer the question."
 DEFAULT_NUM_READS_PER_DOC = 2
 DEFAULT_NUM_GATHER_TOKENS = 4
 
