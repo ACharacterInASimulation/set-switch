@@ -30,8 +30,9 @@ method_overrides:
   setswitch:
     run_name: qwen3_4b_setswitch
     model:
-      # Custom 4D non-causal masks need eager attention for correctness.
-      attn_implementation: eager
+      # SDPA honors the dense custom 4D masks in the current Torch/Transformers stack.
+      # Use scripts/check_sdpa_mask_equivalence.py for exact-model parity checks.
+      attn_implementation: sdpa
       use_lora: true
       trainable: setswitch_tokens
       setswitch_token_init: semantic
@@ -53,8 +54,8 @@ method_overrides:
   setllm:
     run_name: qwen3_4b_setllm_lora
     model:
-      # SetMask is also a custom 4D mask, so keep eager unless validated otherwise.
-      attn_implementation: eager
+      # SetMask is also a custom 4D mask; SDPA parity is checked by the repo script.
+      attn_implementation: sdpa
       use_lora: true
       lora_r: 8
       lora_alpha: 1
@@ -65,9 +66,9 @@ method_overrides:
   setfuse:
     run_name: qwen3_4b_setfuse_lora
     model:
-      # SetFuse-LM uses layer-scheduled custom 4D masks, so eager attention is
-      # the dense correctness backend.
-      attn_implementation: eager
+      # SetFuse-LM uses layer-scheduled custom 4D masks; SDPA is faster and
+      # matches eager on the repo parity check.
+      attn_implementation: sdpa
       use_lora: true
       lora_r: 8
       lora_alpha: 1
@@ -93,7 +94,7 @@ data:
   #   retrieved_qa:   17k total, multi-passage retrieved QA
   #   single_passage: 10k total, one SQuAD control bucket
   #   rag_multi_hop:  64k total, emphasized for the main claim
-  # These are train-only limits; dev/eval still use total_val_examples below.
+  # These are train-only limits; paper eval uses eval.max_examples below.
   datasets:
     - name: commonsenseqa
       train_max_examples: 1500
@@ -109,6 +110,11 @@ data:
       train_max_examples: 1500
     - name: msmarco-qa
       train_max_examples: 17000
+      # Paper/test-style eval uses a deterministic random 10k sample from the
+      # public labeled dev split instead of the full 101k-row MS MARCO dev set.
+      paper_max_examples: 10000
+      paper_sample_strategy: random
+      paper_sample_seed: 42
     - name: squad
       train_max_examples: 10000
     - name: hotpotqa
@@ -134,6 +140,7 @@ data:
   # If set, examples are allocated by sample_allocation unless a dataset entry has
   # max_examples. Small datasets naturally cap at their available train/dev size.
   total_train_examples: 100000
+  # Legacy direct-training validation cap. The paper eval path uses eval.max_examples.
   total_val_examples: 1000
   # Task-balanced first, then source-balanced within each task. This prevents
   # MS MARCO or any other large source from dominating the first comparison.
@@ -193,9 +200,8 @@ train:
   save_every: 1000
 
 eval:
-  # Full labeled evaluation split. Most selected FlashRAG sources expose dev labels;
-  # only some expose public labeled test labels.
-  split: dev
+  # Paper split: public labeled test where available, otherwise labeled dev/validation.
+  split: paper
   max_examples: all
   max_new_tokens: 32
   mcq_scoring: logprob

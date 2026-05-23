@@ -309,6 +309,30 @@ def test_split_specific_flashrag_limits_only_affect_requested_split():
     assert dev_selection[0].max_examples is None
 
 
+def test_paper_eval_can_cap_and_random_sample_one_source_without_affecting_train():
+    data_cfg = {
+        "datasets": [
+            {
+                "name": "msmarco-qa",
+                "train_max_examples": 17_000,
+                "paper_max_examples": 10_000,
+                "paper_sample_strategy": "random",
+                "paper_sample_seed": 123,
+            }
+        ]
+    }
+
+    train_selection = normalize_flashrag_sources(data_cfg, split="train")[0]
+    paper_selection = normalize_flashrag_sources(data_cfg, split="paper")[0]
+
+    assert train_selection.max_examples == 17_000
+    assert train_selection.sample_strategy is None
+    assert paper_selection.split == "dev"
+    assert paper_selection.max_examples == 10_000
+    assert paper_selection.sample_strategy == "random"
+    assert paper_selection.sample_seed == 123
+
+
 def test_test_split_selection_skips_sources_without_labeled_test_split():
     selections = normalize_flashrag_sources(
         {
@@ -332,6 +356,31 @@ def test_test_split_selection_skips_sources_without_labeled_test_split():
         "quartz",
     ]
     assert all(selection.split == "test" for selection in selections)
+
+
+def test_paper_split_uses_test_when_available_otherwise_dev():
+    selections = normalize_flashrag_sources(
+        {
+            "datasets": [
+                "openbookqa",
+                "arc",
+                "mmlu",
+                "quartz",
+                "hotpotqa",
+                "musique",
+            ]
+        },
+        split="paper",
+    )
+
+    assert [(selection.name, selection.split) for selection in selections] == [
+        ("openbookqa", "test"),
+        ("arc", "test"),
+        ("mmlu", "test"),
+        ("quartz", "test"),
+        ("hotpotqa", "dev"),
+        ("musique", "validation"),
+    ]
 
 
 def test_task_balanced_equal_allocation_prevents_msmarco_domination():

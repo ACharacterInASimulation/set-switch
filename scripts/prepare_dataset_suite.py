@@ -32,10 +32,25 @@ def _load_length_filter_tokenizer(cfg: dict, add_setswitch_tokens_for_filter: bo
     return tokenizer
 
 
+def _selection_label(selection) -> str:
+    label = f"{selection.name}[{selection.split}]"
+    if selection.max_examples is not None:
+        label += f":{selection.max_examples}"
+    sample_strategy = getattr(selection, "sample_strategy", None)
+    if sample_strategy:
+        label += f":{sample_strategy}@{getattr(selection, 'sample_seed', None) or 42}"
+    return label
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--split", choices=["train", "val"], default="train")
+    parser.add_argument(
+        "--split",
+        choices=["train", "val", "dev", "test", "paper"],
+        default="train",
+        help="paper = public labeled test where available, otherwise dev/validation.",
+    )
     parser.add_argument("--output", required=True)
     parser.add_argument("--max-render-tokens", type=int)
     parser.add_argument("--length-filter-interfaces", default=None)
@@ -43,7 +58,7 @@ def main() -> None:
     parser.add_argument(
         "--max-examples",
         default=None,
-        help="Integer cap for this prepared split, or 'all'. Defaults to train cap for train and all for val/test.",
+        help="Integer cap for this prepared split, or 'all'. Defaults to train cap for train and all for val/dev/test/paper.",
     )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -114,11 +129,7 @@ def main() -> None:
         )
         print(
             "Sources: "
-            + ", ".join(
-                f"{selection.name}[{selection.split}]"
-                + (f":{selection.max_examples}" if selection.max_examples is not None else "")
-                for selection in selections
-            )
+            + ", ".join(_selection_label(selection) for selection in selections)
         )
         if apply_length_filter:
             print(

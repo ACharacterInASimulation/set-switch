@@ -208,17 +208,20 @@ evidence in late layers.
 
 ## Evaluation Output
 
-By default evaluation uses the full labeled evaluation split:
+By default evaluation uses the paper evaluation split:
 
 ```yaml
 eval:
-  split: dev
+  split: paper
   max_examples: all
 ```
 
-`dev` is used because most selected FlashRAG sources expose labeled dev/validation
-rows, while only some expose public labeled test rows. Passing `--split test`
-uses public labeled test rows for the datasets that provide them.
+`paper` means public labeled test where a selected dataset provides one, otherwise
+labeled dev/validation. This keeps every selected dataset in the paper table while
+using the closest standard reported split available locally. MS MARCO QA is capped
+to a deterministic 10k random sample for paper/test-style evaluation. Pure
+`--split dev` and pure `--split test` are still available for ablations; pure
+`test` only covers datasets that expose public labeled test rows.
 
 Each eval JSON contains:
 
@@ -229,6 +232,7 @@ reported_overall_summary     reported overall summary, one example counted once 
 source_summary               condition-expanded summaries for visualization
 overall_summary              condition-expanded overall summaries for visualization
 metric_policy                metric names and caveats by source
+source_split_summary         which split each dataset used in the report
 ```
 
 For paper tables, use `dataset_summary` and `reported_overall_summary`, not

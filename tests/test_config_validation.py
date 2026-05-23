@@ -30,9 +30,13 @@ def test_validate_config_accepts_default_custom_mask_setup():
     validate_config(_cfg("setfuse"))
 
 
-def test_validate_config_rejects_non_eager_custom_masks_without_override():
+def test_validate_config_accepts_sdpa_custom_masks_and_rejects_other_fast_backends():
     cfg = _cfg("setfuse")
     cfg["model"]["attn_implementation"] = "sdpa"
+
+    validate_config(cfg)
+
+    cfg["model"]["attn_implementation"] = "flash_attention_2"
 
     with pytest.raises(ValueError, match="custom 4D masks"):
         validate_config(cfg)

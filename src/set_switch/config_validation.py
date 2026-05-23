@@ -74,10 +74,10 @@ def validate_config(cfg: dict[str, Any], require_model_name: bool = True) -> Non
         _require_bool(train_cfg, "train", key)
 
     attn_impl = model_cfg.get("attn_implementation")
-    if interface in CUSTOM_MASK_INTERFACES and attn_impl not in {None, "eager"}:
+    if interface in CUSTOM_MASK_INTERFACES and attn_impl not in {None, "eager", "sdpa"}:
         if not bool(model_cfg.get("allow_non_eager_custom_masks", False)):
             raise ValueError(
-                f"{interface} uses custom 4D masks; set model.attn_implementation: eager "
+                f"{interface} uses custom 4D masks; use model.attn_implementation: eager/sdpa "
                 "or set model.allow_non_eager_custom_masks: true after validating parity."
             )
 

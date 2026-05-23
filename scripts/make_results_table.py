@@ -154,11 +154,14 @@ def build_long_rows(reports: list[dict[str, Any]], scale: str) -> list[dict[str,
         interface = str(report.get("interface", "unknown"))
         summaries = {"overall": report.get("reported_overall_summary", {}).get("overall", {})}
         summaries.update(report.get("dataset_summary", {}))
+        split_summary = report.get("source_split_summary", {})
         for dataset, summary in summaries.items():
+            dataset_split = split_summary.get(dataset, {})
             row = {
                 "interface": interface,
                 "method": INTERFACE_LABELS.get(interface, interface),
                 "dataset": dataset,
+                "split": dataset_split.get("hf_split", report.get("split", "")),
                 "total": int(summary.get("total", 0)),
             }
             for metric in METRIC_LABELS:
@@ -198,6 +201,7 @@ def main() -> None:
             "interface",
             "method",
             "dataset",
+            "split",
             "total",
             *METRIC_LABELS.keys(),
         ]

@@ -903,6 +903,8 @@ def _load_eval_examples(
     jsonl_keys = [f"{split}_jsonl"]
     if split in {"dev", "validation", "val"}:
         jsonl_keys.extend(["dev_jsonl", "val_jsonl"])
+    if split in {"paper", "auto", "best"}:
+        jsonl_keys.extend(["paper_jsonl", "eval_jsonl", "dev_jsonl", "val_jsonl"])
     for jsonl_key in jsonl_keys:
         if data_cfg.get(jsonl_key):
             if verbose:
@@ -923,10 +925,18 @@ def _load_eval_examples(
             f"sources={len(selections)}"
         )
         for selection in selections:
+            sample_strategy = getattr(selection, "sample_strategy", None)
+            sample_seed = getattr(selection, "sample_seed", None)
+            sample_text = (
+                f" sample={sample_strategy} seed={sample_seed or 42}"
+                if sample_strategy
+                else ""
+            )
             print(
                 "  source: "
                 f"{selection.name}[{selection.split}] "
                 f"per_source_limit={selection.max_examples if selection.max_examples is not None else 'all'}"
+                f"{sample_text}"
             )
     return load_flashrag_selected_examples(
         dataset_name=data_cfg.get("dataset_name", "RUC-NLPIR/FlashRAG_datasets"),
@@ -1091,6 +1101,7 @@ def main() -> None:
     option_task_counts: dict[str, dict[str, float]] = defaultdict(_empty_option_summary_count)
     option_source_counts: dict[str, dict[str, float]] = defaultdict(_empty_option_summary_count)
     option_overall_counts: dict[str, dict[str, float]] = defaultdict(_empty_option_summary_count)
+    source_split_counts: dict[str, dict[str, Any]] = {}
     rows = []
     option_vote_rows = []
 
@@ -1101,6 +1112,18 @@ def main() -> None:
             or task_group_for_source(example.source)
         )
         source = example.source.removeprefix("flashrag_")
+        requested_split = str(example.metadata.get("requested_split", split))
+        hf_split = str(example.metadata.get("hf_split", requested_split))
+        split_entry = source_split_counts.setdefault(
+            source,
+            {
+                "source": source,
+                "requested_split": requested_split,
+                "hf_split": hf_split,
+                "total": 0,
+            },
+        )
+        split_entry["total"] += 1
         sweep_status = gold_sweep_status(example)
         scored_predictions: list[dict[str, Any]] = []
         sweep_option_order = (
@@ -1204,6 +1227,8 @@ def main() -> None:
                     "example_id": example.example_id,
                     "source": example.source,
                     "source_config": source,
+                    "requested_split": requested_split,
+                    "hf_split": hf_split,
                     "task_group": task,
                     "majority_prediction": majority_prediction,
                     "permutation_predictions": predictions,
@@ -1270,6 +1295,12 @@ def main() -> None:
         "option_permutations": option_permutations,
         "option_permutation_sweep": sweep_option_permutations,
         "metric_policy": METRIC_POLICY,
+        "eval_split_policy": (
+            "public labeled test where available, otherwise labeled dev/validation"
+            if split in {"paper", "auto", "best"}
+            else f"requested split {split}"
+        ),
+        "source_split_summary": {key: value for key, value in sorted(source_split_counts.items())},
         "reported_summary_policy": (
             "averages all generated sweep/permutation conditions"
             if sweep_gold_positions or sweep_option_permutations

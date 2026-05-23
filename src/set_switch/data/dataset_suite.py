@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import re
 import math
+import random
+import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -47,6 +48,8 @@ class FlashRAGSourceSelection:
     split: str
     max_examples: int | None = None
     percent: float | None = None
+    sample_strategy: str | None = None
+    sample_seed: int | None = None
 
 
 TASK_MCQ = "normal_mcq"
@@ -426,6 +429,19 @@ def _parse_percent(value: str) -> float:
     return float(stripped)
 
 
+def _normalize_sample_strategy(value: Any) -> str | None:
+    if value is None:
+        return None
+    strategy = str(value).strip().lower()
+    if strategy in {"", "first", "head", "sequential"}:
+        return None
+    if strategy in {"random", "uniform", "reservoir"}:
+        return "random"
+    raise ValueError(
+        f"Unknown FlashRAG sample strategy {value!r}; expected random or first/head"
+    )
+
+
 def _parse_source_string(text: str, default_split: str) -> FlashRAGSourceSelection:
     """Parse compact source specs like hotpotqa[:0.5] or mmlu[dev:10%]."""
 
@@ -717,6 +733,11 @@ def task_group_for_source(source: str) -> str:
 
 def _split_for_source(source: str, requested_split: str) -> str:
     source = _canonical_source_name(source)
+    if requested_split in {"paper", "auto", "best"}:
+        spec = DATASET_SPECS.get(source)
+        if spec is not None and spec.test_split is not None:
+            return spec.test_split
+        return spec.validation_split if spec else "dev"
     if requested_split not in {"train", "dev", "validation", "val", "test"}:
         return requested_split
     spec = DATASET_SPECS.get(source)
@@ -737,6 +758,24 @@ def _source_supports_requested_split(source: str, requested_split: str) -> bool:
         return True
     spec = DATASET_SPECS.get(source)
     return spec is None or spec.test_split is not None
+
+
+def _resolve_selection_for_requested_split(
+    selection: FlashRAGSourceSelection,
+    requested_split: str,
+) -> FlashRAGSourceSelection:
+    if requested_split not in {"paper", "auto", "best"}:
+        return selection
+    if selection.split not in {"paper", "auto", "best"}:
+        return selection
+    return FlashRAGSourceSelection(
+        name=selection.name,
+        split=_split_for_source(selection.name, requested_split),
+        max_examples=selection.max_examples,
+        percent=selection.percent,
+        sample_strategy=selection.sample_strategy,
+        sample_seed=selection.sample_seed,
+    )
 
 
 def _source_selection_limit(
@@ -932,6 +971,8 @@ def normalize_flashrag_sources(
         aliases = [split]
         if split in {"dev", "validation", "val"}:
             aliases.extend(["validation", "val", "dev", "eval"])
+        if split in {"paper", "auto", "best"}:
+            aliases.extend(["paper", "eval", "test", "validation", "val", "dev"])
         for alias in dict.fromkeys(aliases):
             key = f"{alias}_{field}"
             if item.get(key) is not None:
@@ -941,6 +982,7 @@ def normalize_flashrag_sources(
     for item in raw_sources:
         if isinstance(item, str):
             selection = _parse_source_string(item, str(data_cfg.get(f"{split}_split", split)))
+            selection = _resolve_selection_for_requested_split(selection, split)
             if _source_supports_requested_split(selection.name, selection.split):
                 selections.append(selection)
             continue
@@ -963,12 +1005,46 @@ def normalize_flashrag_sources(
                     if split_specific_value(item, "percent") is not None
                     else None
                 ),
+                sample_strategy=_normalize_sample_strategy(
+                    split_specific_value(item, "sample_strategy")
+                    if split_specific_value(item, "sample_strategy") is not None
+                    else split_specific_value(item, "sample")
+                ),
+                sample_seed=(
+                    int(split_specific_value(item, "sample_seed"))
+                    if split_specific_value(item, "sample_seed") is not None
+                    else None
+                ),
             )
+            selection = _resolve_selection_for_requested_split(selection, split)
             if _source_supports_requested_split(selection.name, selection.split):
                 selections.append(selection)
             continue
         raise TypeError(f"Unsupported FlashRAG dataset entry: {item!r}")
     return selections
+
+
+def _convert_selected_flashrag_row(
+    selection: FlashRAGSourceSelection,
+    row: dict[str, Any],
+    row_idx: int,
+    max_docs: int,
+    instruction: str,
+) -> SetSwitchExample | None:
+    if selection.name == "musique":
+        return convert_native_musique_row(
+            row=row,
+            example_idx=row_idx,
+            max_docs=max_docs,
+            instruction=instruction,
+        )
+    return convert_flashrag_row(
+        row=row,
+        example_idx=row_idx,
+        max_docs=max_docs,
+        instruction=instruction,
+        config_name=selection.name,
+    )
 
 
 def iter_flashrag_selected_examples(
@@ -999,34 +1075,70 @@ def iter_flashrag_selected_examples(
             continue
         if verbose:
             limit_text = "all" if limit is None else str(limit)
+            sample_text = (
+                f" sample={selection.sample_strategy} seed={selection.sample_seed or 42}"
+                if selection.sample_strategy
+                else ""
+            )
             print(
                 "Loading FlashRAG source: "
                 f"name={selection.name} requested_split={selection.split} "
-                f"hf_split={hf_split} limit={limit_text}"
+                f"hf_split={hf_split} limit={limit_text}{sample_text}"
             )
         if selection.name == "musique":
             dataset = load_dataset(NATIVE_MUSIQUE_DATASET_NAME, split=hf_split, streaming=True)
         else:
             dataset = load_dataset(dataset_name, selection.name, split=hf_split, streaming=True)
+
+        if selection.sample_strategy == "random" and limit is not None:
+            rng = random.Random(selection.sample_seed if selection.sample_seed is not None else 42)
+            reservoir: list[tuple[int, SetSwitchExample]] = []
+            accepted = 0
+            for row_idx, row in enumerate(dataset):
+                example = _convert_selected_flashrag_row(
+                    selection=selection,
+                    row=dict(row),
+                    row_idx=row_idx,
+                    max_docs=max_docs,
+                    instruction=instruction,
+                )
+                if example is None:
+                    continue
+                example.metadata.setdefault("requested_split", selection.split)
+                example.metadata.setdefault("hf_split", hf_split)
+                if example_filter is not None and not example_filter(example):
+                    continue
+                accepted += 1
+                item = (row_idx, example)
+                if len(reservoir) < limit:
+                    reservoir.append(item)
+                else:
+                    replace_idx = rng.randrange(accepted)
+                    if replace_idx < limit:
+                        reservoir[replace_idx] = item
+            reservoir.sort(key=lambda item: item[0])
+            for _, example in reservoir:
+                yield example
+            if verbose:
+                print(
+                    "Finished FlashRAG source: "
+                    f"name={selection.name} kept={len(reservoir)} candidates={accepted}"
+                )
+            continue
+
         kept = 0
         for row_idx, row in enumerate(dataset):
-            if selection.name == "musique":
-                example = convert_native_musique_row(
-                    row=dict(row),
-                    example_idx=row_idx,
-                    max_docs=max_docs,
-                    instruction=instruction,
-                )
-            else:
-                example = convert_flashrag_row(
-                    row=dict(row),
-                    example_idx=row_idx,
-                    max_docs=max_docs,
-                    instruction=instruction,
-                    config_name=selection.name,
-                )
+            example = _convert_selected_flashrag_row(
+                selection=selection,
+                row=dict(row),
+                row_idx=row_idx,
+                max_docs=max_docs,
+                instruction=instruction,
+            )
             if example is None:
                 continue
+            example.metadata.setdefault("requested_split", selection.split)
+            example.metadata.setdefault("hf_split", hf_split)
             if example_filter is not None and not example_filter(example):
                 continue
             yield example
