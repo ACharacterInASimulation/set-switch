@@ -40,6 +40,11 @@ def main() -> None:
     parser.add_argument("--max-render-tokens", type=int)
     parser.add_argument("--length-filter-interfaces", default=None)
     parser.add_argument("--no-length-filter", action="store_true")
+    parser.add_argument(
+        "--max-examples",
+        default=None,
+        help="Integer cap for this prepared split, or 'all'. Defaults to train cap for train and all for val/test.",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -52,7 +57,16 @@ def main() -> None:
         "instruction",
         "Use the provided passages or options to answer the question.",
     )
-    total_key = "total_train_examples" if args.split == "train" else "total_val_examples"
+    if args.max_examples is not None:
+        total_examples = (
+            None
+            if str(args.max_examples).strip().lower() in {"all", "none", "null"}
+            else int(args.max_examples)
+        )
+    elif args.split == "train":
+        total_examples = data_cfg.get("total_train_examples")
+    else:
+        total_examples = None
     max_render_tokens = (
         args.max_render_tokens
         if args.max_render_tokens is not None
@@ -95,7 +109,8 @@ def main() -> None:
         print(
             "Preparing dataset suite: "
             f"split={args.split} output={args.output} "
-            f"target={data_cfg.get(total_key)} max_docs={data_cfg.get('max_docs', 8)}"
+            f"target={total_examples if total_examples is not None else 'all'} "
+            f"max_docs={data_cfg.get('max_docs', 8)}"
         )
         print(
             "Sources: "
@@ -116,15 +131,16 @@ def main() -> None:
         selections=selections,
         max_docs=int(data_cfg.get("max_docs", 8)),
         instruction=instruction,
-        total_examples=data_cfg.get(total_key),
+        total_examples=total_examples,
         sample_allocation=data_cfg.get("sample_allocation", "task_balanced_equal"),
         sample_allocation_alpha=float(data_cfg.get("sample_allocation_alpha", 0.5)),
         example_filter=example_filter,
+        verbose=bool(args.verbose),
     )
     examples = list(
         tqdm(
             iterator,
-            total=data_cfg.get(total_key),
+            total=total_examples,
             desc=f"Building {args.split}",
             disable=not args.verbose,
         )
