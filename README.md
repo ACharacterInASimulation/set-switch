@@ -100,40 +100,45 @@ attend into the document set.
 
 ## Dataset Suite
 
-The data path is FlashRAG-only. `RUC-NLPIR/FlashRAG_datasets` aggregates common RAG and
-multiple-choice QA sources behind one Hugging Face dataset family and gives stable
-train/dev splits for the sources we use.
+The main data path uses `RUC-NLPIR/FlashRAG_datasets`, which aggregates common RAG
+and multiple-choice QA sources behind one Hugging Face dataset family and gives stable
+train/dev splits for most sources. MuSiQue is the exception: it is loaded from
+`dgslibisey/MuSiQue` so the rendered set contains all paragraphs, including
+distractors, rather than FlashRAG's support-only MuSiQue conversion.
 
 Final v0 task buckets:
 
 - `normal_mcq`: `commonsenseqa`, `openbookqa`, `arc`, `hellaswag`, `mmlu`, `quartz`
-- `multihop_mcq`: `qasc`
-- `rag_single_hop`: `msmarco-qa`, `squad`, `boolq`
+- `retrieved_qa`: `msmarco-qa`
+- `single_passage_control`: `squad`
 - `rag_multi_hop`: `hotpotqa`, `2wikimultihopqa`, `musique`
-- `aggregation`: `ambig_qa`
 
 Rationale: SetLLM is strongest and most directly motivated for unordered multiple
-choice. SetSwitch additionally targets document sets, so the suite adds single-hop RAG,
-multi-hop RAG, and an ambiguous/multi-answer bucket. FlashRAG `piqa` and `siqa` are not
-default training sources because the normalized FlashRAG rows do not expose clean
-choice/gold-label structure for the exact SetLLM-style setup; they can be added later
-through native dataset adapters.
+choice. SetSwitch additionally targets document sets, so the suite adds retrieved QA
+and multi-hop RAG. Default examples are mostly set-shaped: either multiple answer
+choices or multiple passages/documents. We keep one small SQuAD bucket as a
+single-passage extractive QA control. FlashRAG `piqa`, `siqa`, `boolq`, and `ambig_qa`
+are not default training sources because they are ambiguous, too weak for the set
+interface, or missing a clean paper-defensible target for the exact SetLLM-style setup.
+They can be added later through native dataset adapters.
 
-QASC is loaded from `allenai/qasc` rather than FlashRAG. It contributes an 8-way
-science multiple-choice task whose two support facts are rendered as evidence
-documents, while the choices are placed in the question text.
+The main supervised target is always the dataset final answer, not an intermediate
+reasoning trace, so the setup stays comparable to standard QA and SetLLM-style training.
 
 Document/passage QA sources include:
 
 - `hotpotqa`: multi-document Wikipedia QA with supporting facts.
 - `2wikimultihopqa`: multi-hop Wikipedia QA with supporting facts.
-- `musique`: compositional multi-hop QA. In the FlashRAG form, MuSiQue exposes the
-  supporting paragraphs directly; this is useful for learning but has fewer distractors
-  than the original MuSiQue adapter.
+- `musique`: compositional multi-hop QA loaded from the native all-paragraph adapter.
+  Supporting paragraphs are marked, but distractor paragraphs are still rendered.
 - `msmarco-qa`: retrieved-passage QA with selected passage flags.
-- `squad`: single-passage extractive QA.
-- `boolq`: single-passage yes/no QA.
-- `ambig_qa`: ambiguous/multi-answer QA converted from available search-result snippets.
+- `squad`: single-passage extractive QA, used only as a small control bucket.
+
+`boolq` remains an opt-in adapter path, but it is not in the default paper suite because
+yes/no single-passage examples are not useful for the unordered-set claim.
+
+`ambig_qa` remains an opt-in adapter for diagnostics, but it is not in the default
+paper suite because the proper answer-set metric is not implemented here.
 
 SetSwitch also supports unordered option sets. For multiple-choice datasets, each
 choice is rendered as a separate `<item>` and the target answer is the correct choice
@@ -155,7 +160,6 @@ Detailed evaluation buckets are also emitted when metadata is available:
 - 2WikiMultiHopQA: for example `2wikimultihopqa_compositional`,
   `2wikimultihopqa_comparison`, and `2wikimultihopqa_bridge_comparison`
 - MuSiQue: `musique_2hop`, `musique_3hop`, `musique_4hop`
-- QASC: `qasc_2hop_mcq`
 
 ## SetLLM Baseline
 
@@ -206,13 +210,17 @@ data:
 The default 100k train mix is explicit:
 
 - normal MCQ: 9k total, 1.5k from each normal MCQ source
-- QASC multi-hop MCQ: 6k
-- single-hop RAG: 27k total
-- multi-hop RAG: 50k total
-- AmbigQA aggregation: 8k
+- retrieved QA: 17k total from MS MARCO QA
+- single-passage control: 10k total from SQuAD
+- multi-hop RAG: 64k total
 
 The train-only limits do not affect validation or evaluation. The default validation
 budget remains 1k and is allocated across the selected dev sources.
+
+Training examples are additionally guarded by `train_max_render_tokens: 4096`. During
+train JSONL preparation, and during direct FlashRAG training, examples whose rendered
+prompt plus answer exceed this cap are skipped and replaced by later examples from the
+same source allocation. Validation and test examples are not length-filtered.
 
 The default set size is `max_docs: 20` and keeps full converted documents
 (`max_doc_tokens: null`). This avoids silently cutting away evidence. If you need a
@@ -266,6 +274,18 @@ python scripts/prepare_dataset_suite.py \
   --split train \
   --output data/flashrag_train.jsonl
 ```
+
+Override the train-only length filter:
+
+```bash
+python scripts/prepare_dataset_suite.py \
+  --config configs/flashrag.yaml \
+  --split train \
+  --output data/flashrag_train.jsonl \
+  --max-render-tokens 4096
+```
+
+Use `--no-length-filter` to export the uncapped train split.
 
 ## Train
 
@@ -332,8 +352,11 @@ python scripts/evaluate.py \
 
 The `eval:` block in the config controls split, sample count, generation length, output
 path, and gold-position sweep. The decoder baseline performs the explicit
-gold-position sweep. SetSwitch and SetLLM generate once per example and report the same
-score across the sweep buckets because their set interfaces are structurally
+gold-position sweep for document QA. For MCQ examples, the decoder baseline also runs
+`eval.option_permutations: 4` deterministic random option orders and writes
+permutation-mean, any/all-permutation, and majority-vote accuracies under
+`option_order_summary`. SetSwitch and SetLLM generate once per example and report the
+same score across the sweep buckets because their set interfaces are structurally
 permutation-invariant.
 
 Evaluate the labeled test split:
@@ -346,12 +369,15 @@ python scripts/evaluate.py \
 ```
 
 For the current suite, `--split test` includes only selected sources with labeled test
-splits: OpenBookQA, ARC, MMLU, QuaRTz, and QASC. Their known total is 19,794 examples;
+splits: OpenBookQA, ARC, MMLU, and QuaRTz. Their known total is 18,874 examples;
 the default `eval.max_examples: 1000` samples from them.
 
-The report writes task, source, and overall summaries. Primary metrics are normalized
-accuracy for MCQ/BoolQ/QASC, ROUGE-L for MS MARCO QA, and token F1 for the other QA and
-multi-hop sources, with exact match and token F1 also logged per row.
+The report writes condition-specific summaries, a plain `dataset_summary` table,
+`reported_overall_summary`, and per-row predictions. Primary metrics follow the
+original dataset families: normalized accuracy for MCQ and BoolQ, ROUGE-L for MS MARCO
+QA with BLEU-1 also logged, and SQuAD/Hotpot/2Wiki/MuSiQue-style normalized exact
+match plus token F1 for extractive and multi-hop QA. HotpotQA supporting-fact and joint
+metrics are not reported because these models emit only final answers.
 
 ## Inspect And Debug
 

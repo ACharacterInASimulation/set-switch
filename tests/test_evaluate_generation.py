@@ -21,6 +21,11 @@ _SPEC.loader.exec_module(_EVALUATE)
 _greedy_setswitch = _EVALUATE._greedy_setswitch
 gold_sweep_status = _EVALUATE.gold_sweep_status
 gold_position_sweep_enabled = _EVALUATE.gold_position_sweep_enabled
+option_permutation_sweep_enabled = _EVALUATE.option_permutation_sweep_enabled
+permute_option_documents = _EVALUATE.permute_option_documents
+_majority_prediction = _EVALUATE._majority_prediction
+_summarize_option_counts = _EVALUATE._summarize_option_counts
+_update_option_summary_count = _EVALUATE._update_option_summary_count
 load_eval_tokenizer_and_model = _EVALUATE.load_eval_tokenizer_and_model
 score_prediction = _EVALUATE.score_prediction
 
@@ -90,6 +95,55 @@ def test_only_causal_baseline_uses_explicit_gold_position_sweep():
     assert gold_position_sweep_enabled("chat_baseline") is True
     assert gold_position_sweep_enabled("setllm") is False
     assert gold_position_sweep_enabled("setswitch") is False
+
+
+def test_only_causal_baseline_uses_option_permutation_sweep():
+    assert option_permutation_sweep_enabled("chat_baseline") is True
+    assert option_permutation_sweep_enabled("setllm") is False
+    assert option_permutation_sweep_enabled("setswitch") is False
+
+
+def test_option_permutation_is_seeded_and_preserves_choices():
+    example = SetSwitchExample(
+        example_id="mcq",
+        instruction="Use docs.",
+        question="Q?",
+        documents=[
+            SetSwitchDocument("d0", "Candidate answer: a", False, {"choice_index": 0}),
+            SetSwitchDocument("d1", "Candidate answer: b", True, {"choice_index": 1}),
+            SetSwitchDocument("d2", "Candidate answer: c", False, {"choice_index": 2}),
+            SetSwitchDocument("d3", "Candidate answer: d", False, {"choice_index": 3}),
+        ],
+        answer="b",
+        source="flashrag_arc",
+        metadata={"set_type": "options", "golden_answers": ["b"]},
+    )
+
+    first = permute_option_documents(example, permutation_index=0, seed=7)
+    second = permute_option_documents(example, permutation_index=0, seed=7)
+
+    assert [doc.doc_id for doc in first.documents] == [doc.doc_id for doc in second.documents]
+    assert sorted(doc.doc_id for doc in first.documents) == ["d0", "d1", "d2", "d3"]
+
+
+def test_option_permutation_summary_reports_majority_vote_accuracy():
+    counts = {"overall": _EVALUATE._empty_option_summary_count()}
+    scores = [
+        {"primary_score": 1.0, "correct": True},
+        {"primary_score": 0.0, "correct": False},
+        {"primary_score": 1.0, "correct": True},
+        {"primary_score": 0.0, "correct": False},
+    ]
+    majority_score = {"primary_score": 1.0, "correct": True}
+
+    _update_option_summary_count(counts, "overall", scores, majority_score)
+    summary = _summarize_option_counts(counts)
+
+    assert _majority_prediction(["blue", "red", "blue"]) == "blue"
+    assert summary["overall"]["permutation_accuracy_mean"] == 0.5
+    assert summary["overall"]["majority_vote_accuracy"] == 1.0
+    assert summary["overall"]["any_permutation_accuracy"] == 1.0
+    assert summary["overall"]["all_permutations_accuracy"] == 0.0
 
 
 def test_eval_loads_peft_adapter_checkpoint_from_base_model(monkeypatch, tmp_path):
@@ -176,21 +230,20 @@ def test_eval_uses_rouge_l_primary_for_msmarco_qa():
     assert 0.0 < score["primary_score"] < 1.0
 
 
-def test_eval_uses_accuracy_for_qasc():
+def test_exact_match_is_strict_after_normalization():
     example = SetSwitchExample(
-        example_id="qasc",
+        example_id="qa",
         instruction="Use docs.",
-        question="Q?\n\nOptions:\nA. blue\nB. red",
-        documents=[
-            SetSwitchDocument("d0", "fact 1", True),
-            SetSwitchDocument("d1", "fact 2", True),
-        ],
+        question="Q?",
+        documents=[SetSwitchDocument("d0", "Paris is in France.", True)],
         answer="blue",
-        source="qasc",
-        metadata={"golden_answers": ["blue"], "eval_task_group": "qasc_2hop_mcq"},
+        source="flashrag_hotpotqa",
+        metadata={"golden_answers": ["blue"]},
     )
 
-    score = score_prediction(example, "blue")
+    exact_score = score_prediction(example, "blue")
+    extra_text_score = score_prediction(example, "blue car")
 
-    assert score["primary_metric"] == "accuracy"
-    assert score["primary_score"] == 1.0
+    assert exact_score["exact_match"] == 1.0
+    assert extra_text_score["exact_match"] == 0.0
+    assert extra_text_score["token_f1"] > 0.0

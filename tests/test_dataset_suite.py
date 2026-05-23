@@ -4,7 +4,7 @@ from set_switch.data.dataset_suite import (
     FlashRAGSourceSelection,
     allocate_flashrag_source_limits,
     convert_flashrag_row,
-    convert_qasc_row,
+    convert_native_musique_row,
     normalize_flashrag_sources,
     task_group_for_source,
 )
@@ -69,36 +69,6 @@ def test_flashrag_multihop_subtype_metadata_is_reported():
     assert example is not None
     assert example.metadata["question_type"] == "bridge_comparison"
     assert example.metadata["eval_task_group"] == "2wikimultihopqa_bridge_comparison"
-
-
-def test_qasc_row_uses_two_facts_as_documents_and_options_in_question():
-    row = {
-        "id": "qasc_0",
-        "question": "What is formed by clouds?",
-        "choices": {"text": ["rain", "stone"], "label": ["A", "B"]},
-        "answerKey": "A",
-        "fact1": "Rain is formed by water vapor condensing.",
-        "fact2": "Clouds are made of water vapor.",
-        "combinedfact": "Rain can be formed by clouds.",
-    }
-
-    example = convert_qasc_row(
-        row=row,
-        example_idx=0,
-        max_docs=8,
-        instruction="Use documents.",
-    )
-
-    assert example is not None
-    assert example.source == "qasc"
-    assert example.answer == "rain"
-    assert "Options:\nA. rain\nB. stone" in example.question
-    assert [doc.text for doc in example.documents] == [
-        "Rain is formed by water vapor condensing.",
-        "Clouds are made of water vapor.",
-    ]
-    assert all(doc.is_gold for doc in example.documents)
-    assert example.metadata["eval_task_group"] == "qasc_2hop_mcq"
 
 
 def test_flashrag_msmarco_row_converts_passages():
@@ -245,42 +215,50 @@ def test_flashrag_squad_and_boolq_convert_single_passages():
     assert task_group_for_source("flashrag_boolq") == "rag_single_hop"
 
 
-def test_flashrag_musique_marks_support_only_context_policy():
-    example = convert_flashrag_row(
+def test_native_musique_uses_all_paragraphs_and_marks_support():
+    example = convert_native_musique_row(
         row={
-            "id": "musique-0",
+            "id": "2hop__fixture",
             "question": "When was the owner founded?",
-            "golden_answers": ["1960"],
-            "metadata": {
-                "question_decomposition": [
-                    {
-                        "question": "The Collegian >> owned by",
-                        "support_paragraph": {
-                            "idx": 5,
-                            "title": "The Collegian",
-                            "paragraph_text": "The Collegian is owned by Houston Baptist University.",
-                        },
-                    },
-                    {
-                        "question": "Houston Baptist University >> founded",
-                        "support_paragraph": {
-                            "idx": 7,
-                            "title": "Houston Baptist University",
-                            "paragraph_text": "Houston Baptist University was founded in 1960.",
-                        },
-                    },
-                ]
-            },
+            "paragraphs": [
+                {
+                    "idx": 0,
+                    "title": "Distractor",
+                    "paragraph_text": "This paragraph is unrelated.",
+                    "is_supporting": False,
+                },
+                {
+                    "idx": 5,
+                    "title": "The Collegian",
+                    "paragraph_text": "The Collegian is owned by Houston Baptist University.",
+                    "is_supporting": True,
+                },
+                {
+                    "idx": 9,
+                    "title": "Houston",
+                    "paragraph_text": "Houston Baptist University was founded in 1960.",
+                    "is_supporting": True,
+                },
+            ],
+            "question_decomposition": [
+                {"question": "The Collegian >> owned by", "paragraph_support_idx": 5},
+                {"question": "Houston Baptist University >> founded", "paragraph_support_idx": 9},
+            ],
+            "answer": "1960",
+            "answer_aliases": ["nineteen sixty"],
+            "answerable": True,
         },
         example_idx=0,
         max_docs=8,
         instruction="Use documents.",
-        config_name="musique",
     )
 
     assert example is not None
-    assert all(doc.is_gold for doc in example.documents)
-    assert example.metadata["context_policy"] == "support_only_question_decomposition"
+    assert example.source == "musique"
+    assert [doc.is_gold for doc in example.documents] == [False, True, True]
+    assert example.metadata["golden_answers"] == ["1960", "nineteen sixty"]
+    assert example.metadata["context_policy"] == "native_all_paragraphs_with_distractors"
+    assert example.metadata["eval_task_group"] == "musique_2hop"
 
 
 def test_document_limit_keeps_gold_without_moving_gold_to_front():
@@ -341,7 +319,6 @@ def test_test_split_selection_skips_sources_without_labeled_test_split():
                 "hellaswag",
                 "mmlu",
                 "quartz",
-                "qasc",
                 "hotpotqa",
             ]
         },
@@ -353,7 +330,6 @@ def test_test_split_selection_skips_sources_without_labeled_test_split():
         "arc",
         "mmlu",
         "quartz",
-        "qasc",
     ]
     assert all(selection.split == "test" for selection in selections)
 

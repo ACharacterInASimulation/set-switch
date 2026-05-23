@@ -69,17 +69,15 @@ data:
 
   # Final v0 task buckets:
   #   normal_mcq:     commonsenseqa, openbookqa, arc, hellaswag, mmlu, quartz
-  #   multihop_mcq:   qasc
-  #   rag_single_hop: msmarco-qa, squad, boolq
-  #   rag_multi_hop:  hotpotqa, 2wikimultihopqa, musique
-  #   aggregation:    ambig_qa
+  #   retrieved_qa:   msmarco-qa
+  #   single_passage: squad, kept as a small extractive QA control
+  #   rag_multi_hop:  hotpotqa, 2wikimultihopqa, native MuSiQue
   #
   # Training mix for 100k examples:
   #   normal_mcq:      9k total, kept deliberately small as a control bucket
-  #   multihop_mcq:    6k total
-  #   rag_single_hop: 27k total
-  #   rag_multi_hop:  50k total, emphasized for the main claim
-  #   aggregation:    8k total
+  #   retrieved_qa:   17k total, multi-passage retrieved QA
+  #   single_passage: 10k total, one SQuAD control bucket
+  #   rag_multi_hop:  64k total, emphasized for the main claim
   # These are train-only limits; dev/eval still use total_val_examples below.
   datasets:
     - name: commonsenseqa
@@ -94,22 +92,16 @@ data:
       train_max_examples: 1500
     - name: quartz
       train_max_examples: 1500
-    - name: qasc
-      train_max_examples: 6000
     - name: msmarco-qa
-      train_max_examples: 10500
+      train_max_examples: 17000
     - name: squad
-      train_max_examples: 10500
-    - name: boolq
-      train_max_examples: 6000
+      train_max_examples: 10000
     - name: hotpotqa
-      train_max_examples: 20000
+      train_max_examples: 29062
     - name: 2wikimultihopqa
       train_max_examples: 15000
     - name: musique
-      train_max_examples: 15000
-    - name: ambig_qa
-      train_max_examples: 8000
+      train_max_examples: 19938
   #
   # Compact percentage syntax is also supported. hotpotqa[:0.5] means 50% of
   # the selected split, while mmlu[dev:10%] means 10% of MMLU dev.
@@ -139,6 +131,11 @@ data:
   # Keep full converted documents by default. Set this to an integer, e.g. 512,
   # only for memory-controlled runs.
   max_doc_tokens:
+  # Train-only rendered-length guard. Dataset preparation and direct training skip
+  # training examples whose rendered prompt+answer exceeds this cap. Evaluation/test
+  # intentionally ignores this so long-context behavior is still measured.
+  train_max_render_tokens: 4096
+  length_filter_interfaces: all
   # If max_doc_tokens is set, gold/support documents keep a token window around
   # an answer mention when it appears; otherwise they fall back to head truncation.
   doc_truncation: answer_window
@@ -179,4 +176,7 @@ eval:
   max_examples: 1000
   max_new_tokens: 32
   gold_positions: [0.0, 0.25, 0.5, 0.75, 1.0]
+  # For the causal decoder only, MCQ examples are evaluated under several random
+  # option permutations and also with per-example majority vote.
+  option_permutations: 4
   output: outputs/{run_name}_{interface}_{split}_eval.json

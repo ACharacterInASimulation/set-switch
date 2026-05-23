@@ -20,6 +20,7 @@ from set_switch.data.dataset_suite import (
     load_flashrag_selected_examples,
     normalize_flashrag_sources,
 )
+from set_switch.data.length_filter import max_rendered_length
 from set_switch.data.plain_collator import PlainCausalCollator
 from set_switch.data.render import render_example
 from set_switch.data.schema import SetSwitchExample
@@ -66,7 +67,11 @@ class RenderedSetSwitchDataset(Dataset):
         raise ValueError(f"Unknown model interface {self.interface!r}")
 
 
-def _load_examples(cfg: dict[str, Any], split: str) -> list[SetSwitchExample]:
+def _load_examples(
+    cfg: dict[str, Any],
+    split: str,
+    example_filter: Any | None = None,
+) -> list[SetSwitchExample]:
     data_cfg = cfg.get("data", {})
     source = data_cfg.get("source", "flashrag")
 
@@ -88,6 +93,7 @@ def _load_examples(cfg: dict[str, Any], split: str) -> list[SetSwitchExample]:
             total_examples=data_cfg.get(total_key),
             sample_allocation=data_cfg.get("sample_allocation", "task_balanced_equal"),
             sample_allocation_alpha=float(data_cfg.get("sample_allocation_alpha", 0.5)),
+            example_filter=example_filter,
         )
 
     raise ValueError("Only data.source='flashrag' is supported in the simplified training path")
@@ -262,7 +268,28 @@ def train_from_config(cfg: dict[str, Any]) -> None:
     model = apply_trainable_parameter_policy(model, model_cfg, trainable_token_ids)
     configure_special_token_lr_multipliers(model, setswitch_token_ids, train_cfg)
 
-    train_examples = _load_examples(cfg, "train")
+    data_cfg = cfg.get("data", {})
+    train_length_dropped = 0
+    train_max_render_tokens = data_cfg.get("train_max_render_tokens")
+    train_example_filter = None
+    if train_max_render_tokens is not None:
+        train_max_render_tokens = int(train_max_render_tokens)
+
+        def train_example_filter(example: SetSwitchExample) -> bool:
+            nonlocal train_length_dropped
+            keep = (
+                max_rendered_length(
+                    example=example,
+                    tokenizer=tokenizer,
+                    cfg=cfg,
+                    interfaces=(interface,),
+                )
+                <= train_max_render_tokens
+            )
+            train_length_dropped += int(not keep)
+            return keep
+
+    train_examples = _load_examples(cfg, "train", train_example_filter)
     val_examples = _load_examples(cfg, "val")
     render_cfg = {"data": cfg.get("data", {})}
     custom_mask_dtype = attention_mask_dtype_from_config(model_cfg, train_cfg, model)
@@ -345,6 +372,8 @@ def train_from_config(cfg: dict[str, Any]) -> None:
         learning_rate=learning_rate,
         special_token_learning_rate=special_token_learning_rate,
         custom_mask_dtype=str(custom_mask_dtype).replace("torch.", ""),
+        train_max_render_tokens=train_max_render_tokens,
+        train_length_dropped=train_length_dropped,
     )
 
     model.train()

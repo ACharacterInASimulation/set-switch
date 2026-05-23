@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import math
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,7 +14,6 @@ from set_switch.constants import DEFAULT_INSTRUCTION
 from set_switch.data.schema import SetSwitchDocument, SetSwitchExample
 
 FLASHRAG_KNOWN_COUNTS: dict[str, dict[str, int]] = {
-    "qasc": {"train": 8_134, "validation": 926, "test": 920},
     "squad": {"train": 87_599, "dev": 10_570},
     "msmarco-qa": {"train": 808_731, "dev": 101_093},
     "ambig_qa": {"train": 10_036, "dev": 2_002},
@@ -22,7 +21,7 @@ FLASHRAG_KNOWN_COUNTS: dict[str, dict[str, int]] = {
     "boolq": {"train": 9_427, "dev": 3_270},
     "hotpotqa": {"train": 90_447, "dev": 7_405},
     "2wikimultihopqa": {"train": 15_000, "dev": 12_576},
-    "musique": {"train": 19_938, "dev": 2_417},
+    "musique": {"train": 19_938, "validation": 2_417, "dev": 2_417},
     "mmlu": {"train": 99_842, "dev": 1_531, "test": 14_042},
     "hellaswag": {"train": 39_905, "dev": 10_042},
     "arc": {"train": 3_370, "dev": 869, "test": 3_548},
@@ -30,7 +29,7 @@ FLASHRAG_KNOWN_COUNTS: dict[str, dict[str, int]] = {
     "quartz": {"train": 2_696, "dev": 384, "test": 784},
 }
 
-QASC_DATASET_NAME = "allenai/qasc"
+NATIVE_MUSIQUE_DATASET_NAME = "dgslibisey/MuSiQue"
 
 
 @dataclass(frozen=True)
@@ -62,7 +61,6 @@ FLASHRAG_TASK_GROUPS: dict[str, str] = {
     "hellaswag": TASK_MCQ,
     "mmlu": TASK_MCQ,
     "quartz": TASK_MCQ,
-    "qasc": TASK_RAG_MULTI_HOP,
     "msmarco-qa": TASK_RAG_SINGLE_HOP,
     "squad": TASK_RAG_SINGLE_HOP,
     "boolq": TASK_RAG_SINGLE_HOP,
@@ -285,88 +283,12 @@ def convert_option_row(
     )
 
 
-def _letter_labels(count: int) -> list[str]:
-    return [chr(ord("A") + idx) for idx in range(count)]
-
-
-def convert_qasc_row(
-    row: dict[str, Any],
-    example_idx: int,
-    max_docs: int,
-    instruction: str,
-) -> SetSwitchExample | None:
-    question = _clean(row.get("question"))
-    choices = row.get("choices", {})
-    choice_texts = choices.get("text", []) if isinstance(choices, dict) else []
-    choice_labels = choices.get("label", []) if isinstance(choices, dict) else []
-    choice_texts = [_clean(choice) for choice in choice_texts if _clean(choice)]
-    if not choice_texts:
-        return None
-    if not choice_labels or len(choice_labels) != len(choice_texts):
-        choice_labels = _letter_labels(len(choice_texts))
-    choice_labels = [_clean(label) for label in choice_labels]
-    answer_key = _clean(row.get("answerKey"))
-    label_to_text = {
-        label_variant: text
-        for label, text in zip(choice_labels, choice_texts, strict=False)
-        for label_variant in {label, label.upper(), label.lower()}
-    }
-    answer = label_to_text.get(answer_key, "")
-    if not question or not answer:
-        return None
-
-    option_lines = [
-        f"{label}. {text}" for label, text in zip(choice_labels, choice_texts, strict=False)
-    ]
-    question_with_options = f"{question}\n\nOptions:\n" + "\n".join(option_lines)
-    facts = [_clean(row.get("fact1")), _clean(row.get("fact2"))]
-    documents = [
-        SetSwitchDocument(
-            doc_id=f"qasc-{example_idx}-fact-{fact_idx}",
-            text=fact,
-            is_gold=True,
-            metadata={"source_doc_index": fact_idx, "fact_role": f"fact{fact_idx + 1}"},
-        )
-        for fact_idx, fact in enumerate(facts[:max_docs])
-        if fact
-    ]
-    if not documents:
-        return None
-
-    return SetSwitchExample(
-        example_id=f"qasc-{row.get('id', example_idx)}",
-        instruction=instruction,
-        question=question_with_options,
-        documents=documents,
-        answer=answer,
-        source="qasc",
-        metadata={
-            "raw_id": row.get("id"),
-            "answer_key": answer_key,
-            "answer_choices": choice_texts,
-            "golden_answers": [answer],
-            "set_type": "documents",
-            "task_group": task_group_for_source("qasc"),
-            "eval_task_group": "qasc_2hop_mcq",
-            "num_hops": 2,
-            "context_policy": "fact1_fact2_no_combinedfact",
-        },
-    )
-
-
 DATASET_SPECS: dict[str, DatasetSpec] = {
     "hotpotqa": DatasetSpec(
         name="hotpotqa",
         train_split="train",
         validation_split="dev",
         notes="Wikipedia multi-hop QA with paragraph contexts and supporting facts.",
-    ),
-    "qasc": DatasetSpec(
-        name="qasc",
-        train_split="train",
-        validation_split="validation",
-        test_split="test",
-        notes="8-way science MCQ requiring composition of two supporting facts.",
     ),
     "2wikimultihopqa": DatasetSpec(
         name="2wikimultihopqa",
@@ -377,8 +299,8 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
     "musique": DatasetSpec(
         name="musique",
         train_split="train",
-        validation_split="dev",
-        notes="Compositional multi-hop QA with supporting paragraph flags.",
+        validation_split="validation",
+        notes="Native MuSiQue all-paragraph split with supporting paragraph flags.",
     ),
     "msmarco-qa": DatasetSpec(
         name="msmarco-qa",
@@ -449,11 +371,9 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
 DEFAULT_FLASHRAG_DOCUMENT_CONFIGS = [
     "msmarco-qa",
     "squad",
-    "boolq",
     "hotpotqa",
     "2wikimultihopqa",
     "musique",
-    "ambig_qa",
 ]
 
 DEFAULT_FLASHRAG_OPTION_CONFIGS = [
@@ -491,7 +411,6 @@ FLASHRAG_ALIASES = {
     "hellaswag": "hellaswag",
     "mmlu": "mmlu",
     "quartz": "quartz",
-    "qasc": "qasc",
 }
 
 
@@ -571,39 +490,85 @@ def _flashrag_msmarco_documents(
     return _limit_documents_prefer_gold(documents, max_docs)
 
 
-def _flashrag_musique_documents(
-    metadata: dict[str, Any],
+def _musique_support_indices(row: dict[str, Any]) -> set[int]:
+    indices: set[int] = set()
+    for step in _sequence_to_records(row.get("question_decomposition", [])):
+        idx = step.get("paragraph_support_idx")
+        if isinstance(idx, int):
+            indices.add(idx)
+    return indices
+
+
+def _native_musique_documents(
+    row: dict[str, Any],
     example_idx: int,
     max_docs: int,
 ) -> list[SetSwitchDocument]:
+    support_indices = _musique_support_indices(row)
     documents: list[SetSwitchDocument] = []
-    seen: set[tuple[str, str]] = set()
-    decompositions = metadata.get("question_decomposition", [])
-    for doc_idx, step in enumerate(_sequence_to_records(decompositions)):
-        support = step.get("support_paragraph", {})
-        if not isinstance(support, dict):
+    for doc_idx, paragraph in enumerate(_sequence_to_records(row.get("paragraphs", []))):
+        body = _clean(paragraph.get("paragraph_text", paragraph.get("text", "")))
+        if not body:
             continue
-        title = _clean(support.get("title", ""))
-        body = _clean(support.get("paragraph_text"))
-        key = (title, body)
-        if not body or key in seen:
-            continue
-        seen.add(key)
+        title = _clean(paragraph.get("title", ""))
+        paragraph_idx = paragraph.get("idx", doc_idx)
+        is_supporting = bool(paragraph.get("is_supporting", False)) or (
+            isinstance(paragraph_idx, int) and paragraph_idx in support_indices
+        )
         documents.append(
             SetSwitchDocument(
-                doc_id=f"flashrag-musique-{example_idx}-doc-{len(documents)}",
+                doc_id=f"musique-{example_idx}-doc-{doc_idx}",
                 text=f"{title}\n{body}" if title else body,
-                is_gold=True,
+                is_gold=is_supporting,
                 metadata={
                     "title": title,
-                    "source_doc_index": support.get("idx"),
-                    "decomposition_question": step.get("question"),
+                    "source_doc_index": paragraph_idx,
                 },
             )
         )
-        if len(documents) >= max_docs:
-            break
-    return documents
+    return _limit_documents_prefer_gold(documents, max_docs)
+
+
+def convert_native_musique_row(
+    row: dict[str, Any],
+    example_idx: int,
+    max_docs: int,
+    instruction: str,
+) -> SetSwitchExample | None:
+    question = _clean(row.get("question"))
+    answer = _clean(row.get("answer"))
+    if not question or not answer:
+        return None
+    documents = _native_musique_documents(row, example_idx, max_docs)
+    if not documents:
+        return None
+
+    aliases = [_clean(alias) for alias in row.get("answer_aliases", []) if _clean(alias)]
+    golden_answers = [answer, *aliases]
+    num_hops = len(_sequence_to_records(row.get("question_decomposition", [])))
+    example_metadata = {
+        "dataset_name": NATIVE_MUSIQUE_DATASET_NAME,
+        "raw_id": row.get("id"),
+        "golden_answers": golden_answers,
+        "set_type": "documents",
+        "task_group": task_group_for_source("musique"),
+        "context_policy": "native_all_paragraphs_with_distractors",
+        "answerable": bool(row.get("answerable", True)),
+        "num_support_documents": sum(1 for doc in documents if doc.is_gold),
+    }
+    if num_hops > 0:
+        example_metadata["num_hops"] = num_hops
+        example_metadata["eval_task_group"] = f"musique_{num_hops}hop"
+
+    return SetSwitchExample(
+        example_id=f"musique-{row.get('id', example_idx)}",
+        instruction=instruction,
+        question=question,
+        documents=documents,
+        answer=answer,
+        source="musique",
+        metadata=example_metadata,
+    )
 
 
 def _flashrag_single_passage_documents(
@@ -700,8 +665,6 @@ def convert_flashrag_row(
         )
     elif isinstance(metadata.get("passages"), dict):
         documents = _flashrag_msmarco_documents(metadata.get("passages"), example_idx, max_docs)
-    elif metadata.get("question_decomposition"):
-        documents = _flashrag_musique_documents(metadata, example_idx, max_docs)
     elif config_name in {"squad", "boolq"}:
         documents = _flashrag_single_passage_documents(metadata, example_idx, config_name)
     elif config_name == "ambig_qa":
@@ -733,8 +696,6 @@ def convert_flashrag_row(
         example_metadata["num_hops"] = num_hops
     if eval_task_group:
         example_metadata["eval_task_group"] = eval_task_group
-    if config_name == "musique":
-        example_metadata["context_policy"] = "support_only_question_decomposition"
 
     return SetSwitchExample(
         example_id=f"flashrag-{config_name}-{row.get('id', example_idx)}",
@@ -1019,6 +980,7 @@ def iter_flashrag_selected_examples(
     total_examples: int | None = None,
     sample_allocation: str = "task_balanced_equal",
     sample_allocation_alpha: float = 0.5,
+    example_filter: Callable[[SetSwitchExample], bool] | None = None,
 ) -> Iterator[SetSwitchExample]:
     allocated_limits = allocate_flashrag_source_limits(
         selections=selections,
@@ -1035,14 +997,14 @@ def iter_flashrag_selected_examples(
             limit = allocated_limits[selection_idx]
         if limit is not None and limit <= 0:
             continue
-        if selection.name == "qasc":
-            dataset = load_dataset(QASC_DATASET_NAME, split=hf_split, streaming=True)
+        if selection.name == "musique":
+            dataset = load_dataset(NATIVE_MUSIQUE_DATASET_NAME, split=hf_split, streaming=True)
         else:
             dataset = load_dataset(dataset_name, selection.name, split=hf_split, streaming=True)
         kept = 0
         for row_idx, row in enumerate(dataset):
-            if selection.name == "qasc":
-                example = convert_qasc_row(
+            if selection.name == "musique":
+                example = convert_native_musique_row(
                     row=dict(row),
                     example_idx=row_idx,
                     max_docs=max_docs,
@@ -1058,6 +1020,8 @@ def iter_flashrag_selected_examples(
                 )
             if example is None:
                 continue
+            if example_filter is not None and not example_filter(example):
+                continue
             yield example
             kept += 1
             if limit is not None and kept >= limit:
@@ -1072,6 +1036,7 @@ def load_flashrag_selected_examples(
     total_examples: int | None = None,
     sample_allocation: str = "task_balanced_equal",
     sample_allocation_alpha: float = 0.5,
+    example_filter: Callable[[SetSwitchExample], bool] | None = None,
 ) -> list[SetSwitchExample]:
     return list(
         iter_flashrag_selected_examples(
@@ -1082,5 +1047,6 @@ def load_flashrag_selected_examples(
             total_examples=total_examples,
             sample_allocation=sample_allocation,
             sample_allocation_alpha=sample_allocation_alpha,
+            example_filter=example_filter,
         )
     )

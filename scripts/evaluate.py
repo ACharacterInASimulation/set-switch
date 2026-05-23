@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
+import random
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,63 @@ from set_switch.training.train import apply_interface_overrides, attention_mask_
 from set_switch.utils.io import read_yaml
 
 DEFAULT_GOLD_POSITIONS = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+DATASET_EVAL_POLICIES: dict[str, dict[str, Any]] = {
+    "commonsenseqa": {
+        "primary_metric": "accuracy",
+        "standard": "multiple-choice accuracy over normalized option text",
+    },
+    "openbookqa": {
+        "primary_metric": "accuracy",
+        "standard": "multiple-choice accuracy over normalized option text",
+    },
+    "arc": {
+        "primary_metric": "accuracy",
+        "standard": "multiple-choice accuracy over normalized option text",
+    },
+    "hellaswag": {
+        "primary_metric": "accuracy",
+        "standard": "multiple-choice accuracy over normalized continuation text",
+    },
+    "mmlu": {
+        "primary_metric": "accuracy",
+        "standard": "multiple-choice accuracy over normalized option text",
+    },
+    "quartz": {
+        "primary_metric": "accuracy",
+        "standard": "multiple-choice accuracy over normalized option text",
+    },
+    "boolq": {
+        "primary_metric": "accuracy",
+        "standard": "yes/no accuracy",
+    },
+    "squad": {
+        "primary_metric": "token_f1",
+        "standard": "SQuAD-style normalized exact match and token F1",
+    },
+    "hotpotqa": {
+        "primary_metric": "token_f1",
+        "standard": "HotpotQA answer-only normalized exact match and token F1",
+        "note": "Supporting-fact and joint metrics are not reported because this model emits only answers.",
+    },
+    "2wikimultihopqa": {
+        "primary_metric": "token_f1",
+        "standard": "2WikiMultiHopQA answer-only normalized exact match and token F1",
+    },
+    "musique": {
+        "primary_metric": "token_f1",
+        "standard": "MuSiQue answer normalized exact match and token F1",
+    },
+    "msmarco-qa": {
+        "primary_metric": "rouge_l",
+        "standard": "MS MARCO answer generation ROUGE-L primary with BLEU-1 also logged",
+    },
+    "ambig_qa": {
+        "primary_metric": "token_f1",
+        "standard": "Opt-in only. Full AmbigQA answer-set evaluation is not implemented.",
+        "default_suite": False,
+    },
+}
 
 
 def _normalize_answer(text: Any) -> str:
@@ -61,8 +120,6 @@ def _matches(prediction: str, answers: list[str]) -> bool:
     for answer in answers:
         gold = _normalize_answer(answer)
         if pred == gold:
-            return True
-        if gold and pred.startswith(gold + " "):
             return True
     return False
 
@@ -119,17 +176,39 @@ def _rouge_l(prediction: str, answers: list[str]) -> float:
     return best
 
 
+def _bleu1(prediction: str, answers: list[str]) -> float:
+    pred_tokens = _answer_tokens(prediction.splitlines()[0] if prediction else prediction)
+    if not pred_tokens:
+        return 0.0
+    best = 0.0
+    pred_counts = Counter(pred_tokens)
+    for answer in answers:
+        gold_tokens = _answer_tokens(answer)
+        if not gold_tokens:
+            continue
+        gold_counts = Counter(gold_tokens)
+        clipped_overlap = sum(
+            min(count, gold_counts[token]) for token, count in pred_counts.items()
+        )
+        if clipped_overlap == 0:
+            continue
+        precision = clipped_overlap / len(pred_tokens)
+        brevity_penalty = 1.0
+        if len(pred_tokens) < len(gold_tokens):
+            brevity_penalty = math.exp(1.0 - len(gold_tokens) / len(pred_tokens))
+        best = max(best, brevity_penalty * precision)
+    return best
+
+
+def _source_key(example: SetSwitchExample) -> str:
+    return example.source.removeprefix("flashrag_")
+
+
 def _primary_metric_for_example(example: SetSwitchExample) -> str:
-    source = example.source.removeprefix("flashrag_")
-    if example.metadata.get("set_type") == "options" or task_group_for_source(source) == "normal_mcq":
+    source = _source_key(example)
+    if example.metadata.get("set_type") == "options":
         return "accuracy"
-    if source == "qasc":
-        return "accuracy"
-    if source == "boolq":
-        return "accuracy"
-    if source == "msmarco-qa":
-        return "rouge_l"
-    return "token_f1"
+    return str(DATASET_EVAL_POLICIES.get(source, {}).get("primary_metric", "token_f1"))
 
 
 def score_prediction(example: SetSwitchExample, prediction: str) -> dict[str, Any]:
@@ -137,11 +216,13 @@ def score_prediction(example: SetSwitchExample, prediction: str) -> dict[str, An
     exact = _matches(prediction, answers)
     f1 = _token_f1(prediction, answers)
     rouge_l = _rouge_l(prediction, answers)
+    bleu1 = _bleu1(prediction, answers)
     primary_metric = _primary_metric_for_example(example)
     metric_values = {
         "accuracy": float(exact),
         "token_f1": f1,
         "rouge_l": rouge_l,
+        "bleu1": bleu1,
     }
     primary_score = metric_values[primary_metric]
     return {
@@ -150,17 +231,12 @@ def score_prediction(example: SetSwitchExample, prediction: str) -> dict[str, An
         "exact_match": float(exact),
         "token_f1": f1,
         "rouge_l": rouge_l,
+        "bleu1": bleu1,
         "correct": bool(exact),
     }
 
 
-METRIC_POLICY = {
-    "normal_mcq": "normalized exact-match accuracy over option text",
-    "options": "normalized exact-match accuracy over option text",
-    "boolq": "normalized yes/no accuracy",
-    "msmarco-qa": "max normalized ROUGE-L F1 over golden answers, with EM/F1 also logged",
-    "qa": "max normalized token F1 over golden answers, with exact_match also logged",
-}
+METRIC_POLICY = DATASET_EVAL_POLICIES
 
 
 def _empty_count() -> dict[str, float]:
@@ -171,6 +247,7 @@ def _empty_count() -> dict[str, float]:
         "exact_sum": 0.0,
         "f1_sum": 0.0,
         "rouge_l_sum": 0.0,
+        "bleu1_sum": 0.0,
         "movable_total": 0.0,
     }
 
@@ -187,6 +264,7 @@ def _update_count(
     counts[key]["exact_sum"] += float(score["exact_match"])
     counts[key]["f1_sum"] += float(score["token_f1"])
     counts[key]["rouge_l_sum"] += float(score["rouge_l"])
+    counts[key]["bleu1_sum"] += float(score["bleu1"])
     counts[key]["movable_total"] += int(bool(sweep_status["gold_sweep_movable"]))
 
 
@@ -198,6 +276,7 @@ def _summarize_counts(counts: dict[str, dict[str, float]]) -> dict[str, dict[str
             "exact_match": value["exact_sum"] / max(1, value["total"]),
             "token_f1": value["f1_sum"] / max(1, value["total"]),
             "rouge_l": value["rouge_l_sum"] / max(1, value["total"]),
+            "bleu1": value["bleu1_sum"] / max(1, value["total"]),
             "correct": int(value["correct"]),
             "total": int(value["total"]),
             "movable_total": int(value["movable_total"]),
@@ -213,6 +292,16 @@ def gold_position_sweep_enabled(interface: str) -> bool:
     return interface == "chat_baseline"
 
 
+def option_permutation_sweep_enabled(interface: str) -> bool:
+    """Only the ordinary causal baseline needs explicit option-order perturbations."""
+
+    return interface == "chat_baseline"
+
+
+def is_option_example(example: SetSwitchExample) -> bool:
+    return example.metadata.get("set_type") == "options"
+
+
 def place_gold_documents(example: SetSwitchExample, fraction: float) -> SetSwitchExample:
     """Move gold documents/options as a block to an approximate set position."""
 
@@ -226,6 +315,19 @@ def place_gold_documents(example: SetSwitchExample, fraction: float) -> SetSwitc
     return placed
 
 
+def permute_option_documents(
+    example: SetSwitchExample,
+    permutation_index: int,
+    seed: int,
+) -> SetSwitchExample:
+    """Return a deterministic random option order for causal option-sensitivity eval."""
+
+    placed = copy.deepcopy(example)
+    rng = random.Random(f"{seed}:{example.example_id}:{permutation_index}")
+    rng.shuffle(placed.documents)
+    return placed
+
+
 def gold_sweep_status(example: SetSwitchExample) -> dict[str, int | bool]:
     gold_count = sum(1 for doc in example.documents if doc.is_gold)
     non_gold_count = len(example.documents) - gold_count
@@ -234,6 +336,81 @@ def gold_sweep_status(example: SetSwitchExample) -> dict[str, int | bool]:
         "num_non_gold_documents": non_gold_count,
         "gold_sweep_movable": gold_count > 0 and non_gold_count > 0,
     }
+
+
+def _condition_key(
+    gold_position: float | None,
+    option_permutation_index: int | None,
+) -> str:
+    if option_permutation_index is not None:
+        return f"option_perm_{option_permutation_index}"
+    if gold_position is None:
+        return "canonical"
+    return f"{gold_position:g}"
+
+
+def _majority_prediction(predictions: list[str]) -> str:
+    if not predictions:
+        return ""
+    keys = [_normalize_answer(prediction.splitlines()[0]) for prediction in predictions]
+    counts = Counter(keys)
+    first_seen = {key: keys.index(key) for key in counts}
+    return max(counts, key=lambda key: (counts[key], -first_seen[key]))
+
+
+def _empty_option_summary_count() -> dict[str, float]:
+    return {
+        "examples": 0.0,
+        "permutation_predictions": 0.0,
+        "permutation_score_sum": 0.0,
+        "permutation_score_sq_sum": 0.0,
+        "majority_score_sum": 0.0,
+        "majority_correct": 0.0,
+        "any_correct": 0.0,
+        "all_correct": 0.0,
+    }
+
+
+def _update_option_summary_count(
+    counts: dict[str, dict[str, float]],
+    key: str,
+    permutation_scores: list[dict[str, Any]],
+    majority_score: dict[str, Any],
+) -> None:
+    if not permutation_scores:
+        return
+    primary_scores = [float(score["primary_score"]) for score in permutation_scores]
+    correct_values = [float(score["correct"]) for score in permutation_scores]
+    counts[key]["examples"] += 1
+    counts[key]["permutation_predictions"] += len(primary_scores)
+    counts[key]["permutation_score_sum"] += sum(primary_scores)
+    counts[key]["permutation_score_sq_sum"] += sum(score * score for score in primary_scores)
+    counts[key]["majority_score_sum"] += float(majority_score["primary_score"])
+    counts[key]["majority_correct"] += float(majority_score["correct"])
+    counts[key]["any_correct"] += float(any(correct_values))
+    counts[key]["all_correct"] += float(all(correct_values))
+
+
+def _summarize_option_counts(
+    counts: dict[str, dict[str, float]]
+) -> dict[str, dict[str, float | int]]:
+    summary: dict[str, dict[str, float | int]] = {}
+    for key, value in sorted(counts.items()):
+        prediction_total = max(1.0, value["permutation_predictions"])
+        example_total = max(1.0, value["examples"])
+        mean = value["permutation_score_sum"] / prediction_total
+        variance = max(0.0, value["permutation_score_sq_sum"] / prediction_total - mean * mean)
+        summary[key] = {
+            "examples": int(value["examples"]),
+            "permutation_predictions": int(value["permutation_predictions"]),
+            "permutation_accuracy_mean": mean,
+            "permutation_accuracy_std": math.sqrt(variance),
+            "majority_vote_accuracy": value["majority_correct"] / example_total,
+            "majority_vote_primary_score": value["majority_score_sum"] / example_total,
+            "any_permutation_accuracy": value["any_correct"] / example_total,
+            "all_permutations_accuracy": value["all_correct"] / example_total,
+        }
+    return summary
 
 
 def _render(interface: str, example: SetSwitchExample, tokenizer: Any, cfg: dict[str, Any]):
@@ -496,6 +673,7 @@ def main() -> None:
     parser.add_argument("--max-examples", type=int)
     parser.add_argument("--max-new-tokens", type=int)
     parser.add_argument("--gold-positions", nargs="+", type=float)
+    parser.add_argument("--option-permutations", type=int)
     parser.add_argument("--output")
     args = parser.parse_args()
 
@@ -521,6 +699,11 @@ def main() -> None:
         if args.gold_positions is not None
         else _as_float_list(eval_cfg.get("gold_positions"), DEFAULT_GOLD_POSITIONS)
     )
+    option_permutations = (
+        args.option_permutations
+        if args.option_permutations is not None
+        else int(eval_cfg.get("option_permutations", 4))
+    )
     checkpoint = args.checkpoint or eval_cfg.get("checkpoint")
 
     tokenizer, model = load_eval_tokenizer_and_model(cfg, interface, checkpoint)
@@ -530,10 +713,18 @@ def main() -> None:
 
     examples = _load_eval_examples(cfg, split, max_examples)
     sweep_gold_positions = gold_position_sweep_enabled(interface)
+    sweep_option_permutations = option_permutation_sweep_enabled(interface)
     task_counts: dict[str, dict[str, float]] = defaultdict(_empty_count)
     source_counts: dict[str, dict[str, float]] = defaultdict(_empty_count)
     overall_counts: dict[str, dict[str, float]] = defaultdict(_empty_count)
+    reported_task_counts: dict[str, dict[str, float]] = defaultdict(_empty_count)
+    reported_source_counts: dict[str, dict[str, float]] = defaultdict(_empty_count)
+    reported_overall_counts: dict[str, dict[str, float]] = defaultdict(_empty_count)
+    option_task_counts: dict[str, dict[str, float]] = defaultdict(_empty_option_summary_count)
+    option_source_counts: dict[str, dict[str, float]] = defaultdict(_empty_option_summary_count)
+    option_overall_counts: dict[str, dict[str, float]] = defaultdict(_empty_option_summary_count)
     rows = []
+    option_vote_rows = []
 
     for example in examples:
         task = (
@@ -543,8 +734,39 @@ def main() -> None:
         )
         source = example.source.removeprefix("flashrag_")
         sweep_status = gold_sweep_status(example)
-        scored_predictions: list[tuple[float, float | None, str, dict[str, Any]]] = []
-        if sweep_gold_positions:
+        scored_predictions: list[dict[str, Any]] = []
+        sweep_option_order = (
+            sweep_option_permutations and is_option_example(example) and option_permutations > 0
+        )
+        if sweep_option_order:
+            for permutation_index in range(option_permutations):
+                placed = permute_option_documents(
+                    example=example,
+                    permutation_index=permutation_index,
+                    seed=int(cfg.get("seed", 0)),
+                )
+                rendered = _render(interface, placed, tokenizer, cfg)
+                prediction = generate_prediction(
+                    interface=interface,
+                    model=model,
+                    tokenizer=tokenizer,
+                    rendered=rendered,
+                    cfg=cfg,
+                    max_new_tokens=max_new_tokens,
+                )
+                scored_predictions.append(
+                    {
+                        "gold_position": None,
+                        "effective_gold_position": None,
+                        "option_permutation_index": permutation_index,
+                        "option_order": [
+                            doc.metadata.get("choice_index") for doc in placed.documents
+                        ],
+                        "prediction": prediction,
+                        "score": score_prediction(example, prediction),
+                    }
+                )
+        elif sweep_gold_positions:
             for fraction in gold_positions:
                 placed = place_gold_documents(example, fraction)
                 rendered = _render(interface, placed, tokenizer, cfg)
@@ -557,7 +779,14 @@ def main() -> None:
                     max_new_tokens=max_new_tokens,
                 )
                 scored_predictions.append(
-                    (fraction, fraction, prediction, score_prediction(example, prediction))
+                    {
+                        "gold_position": fraction,
+                        "effective_gold_position": fraction,
+                        "option_permutation_index": None,
+                        "option_order": None,
+                        "prediction": prediction,
+                        "score": score_prediction(example, prediction),
+                    }
                 )
         else:
             rendered = _render(interface, example, tokenizer, cfg)
@@ -571,13 +800,55 @@ def main() -> None:
             )
             score = score_prediction(example, prediction)
             scored_predictions = [
-                (fraction, None, prediction, score) for fraction in gold_positions
+                {
+                    "gold_position": fraction,
+                    "effective_gold_position": None,
+                    "option_permutation_index": None,
+                    "option_order": None,
+                    "prediction": prediction,
+                    "score": score,
+                }
+                for fraction in gold_positions
             ]
 
-        for fraction, effective_fraction, prediction, score in scored_predictions:
-            _update_count(task_counts, f"{task}@{fraction:g}", score, sweep_status)
-            _update_count(source_counts, f"{source}@{fraction:g}", score, sweep_status)
-            _update_count(overall_counts, f"overall@{fraction:g}", score, sweep_status)
+        if sweep_option_order:
+            predictions = [item["prediction"] for item in scored_predictions]
+            majority_prediction = _majority_prediction(predictions)
+            majority_score = score_prediction(example, majority_prediction)
+            permutation_scores = [item["score"] for item in scored_predictions]
+            _update_option_summary_count(
+                option_task_counts, task, permutation_scores, majority_score
+            )
+            _update_option_summary_count(
+                option_source_counts, source, permutation_scores, majority_score
+            )
+            _update_option_summary_count(
+                option_overall_counts, "overall", permutation_scores, majority_score
+            )
+            option_vote_rows.append(
+                {
+                    "example_id": example.example_id,
+                    "source": example.source,
+                    "source_config": source,
+                    "task_group": task,
+                    "majority_prediction": majority_prediction,
+                    "permutation_predictions": predictions,
+                    **majority_score,
+                }
+            )
+
+        for item in scored_predictions:
+            fraction = item["gold_position"]
+            option_permutation_index = item["option_permutation_index"]
+            prediction = item["prediction"]
+            score = item["score"]
+            condition = _condition_key(fraction, option_permutation_index)
+            _update_count(task_counts, f"{task}@{condition}", score, sweep_status)
+            _update_count(source_counts, f"{source}@{condition}", score, sweep_status)
+            _update_count(overall_counts, f"overall@{condition}", score, sweep_status)
+            _update_count(reported_task_counts, task, score, sweep_status)
+            _update_count(reported_source_counts, source, score, sweep_status)
+            _update_count(reported_overall_counts, "overall", score, sweep_status)
             rows.append(
                 {
                     "example_id": example.example_id,
@@ -585,8 +856,12 @@ def main() -> None:
                     "source_config": source,
                     "task_group": task,
                     "gold_position": fraction,
-                    "effective_gold_position": effective_fraction,
-                    "gold_position_swept": sweep_gold_positions,
+                    "effective_gold_position": item["effective_gold_position"],
+                    "gold_position_swept": sweep_gold_positions and not sweep_option_order,
+                    "option_permutation_index": option_permutation_index,
+                    "option_order": item["option_order"],
+                    "option_permutation_swept": sweep_option_order,
+                    "condition": condition,
                     "prediction": prediction,
                     "answers": _answers(example),
                     **score,
@@ -597,17 +872,32 @@ def main() -> None:
     summary = _summarize_counts(task_counts)
     source_summary = _summarize_counts(source_counts)
     overall_summary = _summarize_counts(overall_counts)
+    reported_task_summary = _summarize_counts(reported_task_counts)
+    dataset_summary = _summarize_counts(reported_source_counts)
+    reported_overall_summary = _summarize_counts(reported_overall_counts)
+    option_order_summary = {
+        "task_summary": _summarize_option_counts(option_task_counts),
+        "source_summary": _summarize_option_counts(option_source_counts),
+        "overall_summary": _summarize_option_counts(option_overall_counts),
+        "rows": option_vote_rows,
+    }
     report = {
         "interface": interface,
         "split": split,
         "max_examples": max_examples,
         "gold_positions": gold_positions,
         "gold_position_sweep": sweep_gold_positions,
+        "option_permutations": option_permutations,
+        "option_permutation_sweep": sweep_option_permutations,
         "metric_policy": METRIC_POLICY,
         "summary": summary,
         "task_summary": summary,
         "source_summary": source_summary,
         "overall_summary": overall_summary,
+        "reported_task_summary": reported_task_summary,
+        "dataset_summary": dataset_summary,
+        "reported_overall_summary": reported_overall_summary,
+        "option_order_summary": option_order_summary,
         "rows": rows,
     }
 
@@ -623,6 +913,9 @@ def main() -> None:
                 "task_summary": summary,
                 "source_summary": source_summary,
                 "overall_summary": overall_summary,
+                "dataset_summary": dataset_summary,
+                "reported_overall_summary": reported_overall_summary,
+                "option_order_summary": option_order_summary["overall_summary"],
             },
             indent=2,
         )
