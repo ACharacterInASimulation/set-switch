@@ -951,8 +951,7 @@ def normalize_flashrag_sources(
             selection = FlashRAGSourceSelection(
                 name=_canonical_source_name(str(name)),
                 split=str(
-                    split_specific_value(item, "split")
-                    or data_cfg.get(f"{split}_split", split)
+                    split_specific_value(item, "split") or data_cfg.get(f"{split}_split", split)
                 ),
                 max_examples=(
                     int(split_specific_value(item, "max_examples"))
@@ -981,6 +980,7 @@ def iter_flashrag_selected_examples(
     sample_allocation: str = "task_balanced_equal",
     sample_allocation_alpha: float = 0.5,
     example_filter: Callable[[SetSwitchExample], bool] | None = None,
+    verbose: bool = False,
 ) -> Iterator[SetSwitchExample]:
     allocated_limits = allocate_flashrag_source_limits(
         selections=selections,
@@ -997,6 +997,13 @@ def iter_flashrag_selected_examples(
             limit = allocated_limits[selection_idx]
         if limit is not None and limit <= 0:
             continue
+        if verbose:
+            limit_text = "all" if limit is None else str(limit)
+            print(
+                "Loading FlashRAG source: "
+                f"name={selection.name} requested_split={selection.split} "
+                f"hf_split={hf_split} limit={limit_text}"
+            )
         if selection.name == "musique":
             dataset = load_dataset(NATIVE_MUSIQUE_DATASET_NAME, split=hf_split, streaming=True)
         else:
@@ -1026,6 +1033,8 @@ def iter_flashrag_selected_examples(
             kept += 1
             if limit is not None and kept >= limit:
                 break
+        if verbose:
+            print(f"Finished FlashRAG source: name={selection.name} kept={kept}")
 
 
 def load_flashrag_selected_examples(
@@ -1037,6 +1046,7 @@ def load_flashrag_selected_examples(
     sample_allocation: str = "task_balanced_equal",
     sample_allocation_alpha: float = 0.5,
     example_filter: Callable[[SetSwitchExample], bool] | None = None,
+    verbose: bool = False,
 ) -> list[SetSwitchExample]:
     return list(
         iter_flashrag_selected_examples(
@@ -1048,5 +1058,6 @@ def load_flashrag_selected_examples(
             sample_allocation=sample_allocation,
             sample_allocation_alpha=sample_allocation_alpha,
             example_filter=example_filter,
+            verbose=verbose,
         )
     )

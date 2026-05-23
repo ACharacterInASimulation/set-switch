@@ -193,9 +193,10 @@ train:
   save_every: 1000
 
 eval:
-  # Most selected FlashRAG sources expose dev labels; only some expose test labels.
+  # Full labeled evaluation split. Most selected FlashRAG sources expose dev labels;
+  # only some expose public labeled test labels.
   split: dev
-  max_examples: 1000
+  max_examples: all
   max_new_tokens: 32
   mcq_scoring: logprob
   gold_positions: [0.0, 0.25, 0.5, 0.75, 1.0]

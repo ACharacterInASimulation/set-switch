@@ -208,6 +208,18 @@ evidence in late layers.
 
 ## Evaluation Output
 
+By default evaluation uses the full labeled evaluation split:
+
+```yaml
+eval:
+  split: dev
+  max_examples: all
+```
+
+`dev` is used because most selected FlashRAG sources expose labeled dev/validation
+rows, while only some expose public labeled test rows. Passing `--split test`
+uses public labeled test rows for the datasets that provide them.
+
 Each eval JSON contains:
 
 ```text

@@ -150,3 +150,13 @@ def validate_config(cfg: dict[str, Any], require_model_name: bool = True) -> Non
         raise ValueError(
             f"eval.mcq_scoring must be one of {sorted(MCQ_SCORING_VALUES)}, got {mcq_scoring!r}"
         )
+    max_examples = eval_cfg.get("max_examples")
+    if max_examples is not None:
+        if isinstance(max_examples, str) and max_examples.strip().lower() in {
+            "all",
+            "none",
+            "null",
+        }:
+            pass
+        elif int(max_examples) <= 0:
+            raise ValueError("eval.max_examples must be positive or 'all'")

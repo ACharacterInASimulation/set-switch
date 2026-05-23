@@ -870,6 +870,21 @@ def _as_float_list(value: Any, default: list[float]) -> list[float]:
     return [float(item) for item in value]
 
 
+def _parse_max_examples(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if stripped in {"", "all", "none", "null"}:
+            return None
+        return int(stripped)
+    return int(value)
+
+
+def _max_examples_label(max_examples: int | None) -> str:
+    return "all" if max_examples is None else str(max_examples)
+
+
 def _format_output_path(template: str, cfg: dict[str, Any], interface: str, split: str) -> str:
     return template.format(
         run_name=cfg.get("run_name", "set_switch_run"),
@@ -878,19 +893,41 @@ def _format_output_path(template: str, cfg: dict[str, Any], interface: str, spli
     )
 
 
-def _load_eval_examples(cfg: dict[str, Any], split: str, max_examples: int | None):
+def _load_eval_examples(
+    cfg: dict[str, Any],
+    split: str,
+    max_examples: int | None,
+    verbose: bool = False,
+):
     data_cfg = dict(cfg.get("data", {}))
     jsonl_keys = [f"{split}_jsonl"]
     if split in {"dev", "validation", "val"}:
         jsonl_keys.extend(["dev_jsonl", "val_jsonl"])
     for jsonl_key in jsonl_keys:
         if data_cfg.get(jsonl_key):
+            if verbose:
+                print(
+                    "Loading eval JSONL: "
+                    f"key={jsonl_key} path={data_cfg[jsonl_key]} "
+                    f"limit={_max_examples_label(max_examples)}"
+                )
             examples = read_examples_jsonl(data_cfg[jsonl_key])
             return examples[:max_examples] if max_examples is not None else examples
 
-    if max_examples is not None:
-        data_cfg["total_val_examples"] = int(max_examples)
     selections = normalize_flashrag_sources(data_cfg, split)
+    if verbose:
+        print(
+            "Loading eval datasets: "
+            f"dataset={data_cfg.get('dataset_name', 'RUC-NLPIR/FlashRAG_datasets')} "
+            f"requested_split={split} limit={_max_examples_label(max_examples)} "
+            f"sources={len(selections)}"
+        )
+        for selection in selections:
+            print(
+                "  source: "
+                f"{selection.name}[{selection.split}] "
+                f"per_source_limit={selection.max_examples if selection.max_examples is not None else 'all'}"
+            )
     return load_flashrag_selected_examples(
         dataset_name=data_cfg.get("dataset_name", "RUC-NLPIR/FlashRAG_datasets"),
         selections=selections,
@@ -899,9 +936,10 @@ def _load_eval_examples(cfg: dict[str, Any], split: str, max_examples: int | Non
             "instruction",
             "Use the provided passages or options to answer the question.",
         ),
-        total_examples=data_cfg.get("total_val_examples"),
+        total_examples=max_examples,
         sample_allocation=data_cfg.get("sample_allocation", "task_balanced_equal"),
         sample_allocation_alpha=float(data_cfg.get("sample_allocation_alpha", 0.5)),
+        verbose=verbose,
     )
 
 
@@ -983,7 +1021,7 @@ def main() -> None:
         choices=["setswitch", "chat_baseline", "setllm", "setfuse"],
     )
     parser.add_argument("--split")
-    parser.add_argument("--max-examples", type=int)
+    parser.add_argument("--max-examples", help="Integer cap, or 'all' for the full eval split")
     parser.add_argument("--max-new-tokens", type=int)
     parser.add_argument("--gold-positions", nargs="+", type=float)
     parser.add_argument("--option-permutations", type=int)
@@ -1002,10 +1040,8 @@ def main() -> None:
         cfg.get("interface", cfg.get("model", {}).get("interface", "setswitch")),
     )
     split = args.split or eval_cfg.get("split", "dev")
-    max_examples = (
-        args.max_examples
-        if args.max_examples is not None
-        else int(eval_cfg.get("max_examples", 200))
+    max_examples = _parse_max_examples(
+        args.max_examples if args.max_examples is not None else eval_cfg.get("max_examples", "all")
     )
     max_new_tokens = (
         args.max_new_tokens
@@ -1028,7 +1064,7 @@ def main() -> None:
     if verbose:
         print(
             "Evaluation start: "
-            f"interface={interface} split={split} max_examples={max_examples} "
+            f"interface={interface} split={split} max_examples={_max_examples_label(max_examples)} "
             f"max_new_tokens={max_new_tokens} checkpoint={checkpoint or '<base model>'}"
         )
 
@@ -1037,7 +1073,7 @@ def main() -> None:
     model.to(device)
     model.eval()
 
-    examples = _load_eval_examples(cfg, split, max_examples)
+    examples = _load_eval_examples(cfg, split, max_examples, verbose=verbose)
     if verbose:
         print(
             f"Loaded {len(examples)} examples; device={device}; "
@@ -1228,7 +1264,7 @@ def main() -> None:
     report = {
         "interface": interface,
         "split": split,
-        "max_examples": max_examples,
+        "max_examples": _max_examples_label(max_examples),
         "gold_positions": gold_positions,
         "gold_position_sweep": sweep_gold_positions,
         "option_permutations": option_permutations,

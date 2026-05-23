@@ -34,6 +34,7 @@ load_eval_tokenizer_and_model = _EVALUATE.load_eval_tokenizer_and_model
 score_prediction = _EVALUATE.score_prediction
 score_mcq_options = _EVALUATE.score_mcq_options
 _load_eval_examples = _EVALUATE._load_eval_examples
+_parse_max_examples = _EVALUATE._parse_max_examples
 
 
 class RecordingGreedyModel:
@@ -296,6 +297,40 @@ def test_eval_loads_fixed_dev_jsonl(tmp_path, example):
     loaded = _load_eval_examples({"data": {"dev_jsonl": str(path)}}, split="dev", max_examples=1)
 
     assert [item.example_id for item in loaded] == [example.example_id]
+
+
+def test_eval_max_examples_all_is_uncapped():
+    assert _parse_max_examples("all") is None
+    assert _parse_max_examples(None) is None
+    assert _parse_max_examples("7") == 7
+
+
+def test_eval_all_ignores_total_val_examples_cap(monkeypatch):
+    calls = {}
+
+    def fake_normalize(data_cfg, split):
+        calls["data_cfg"] = data_cfg
+        calls["split"] = split
+        return [SimpleNamespace(name="hotpotqa", split="dev", max_examples=None)]
+
+    def fake_load(**kwargs):
+        calls["total_examples"] = kwargs["total_examples"]
+        calls["verbose"] = kwargs["verbose"]
+        return []
+
+    monkeypatch.setattr(_EVALUATE, "normalize_flashrag_sources", fake_normalize)
+    monkeypatch.setattr(_EVALUATE, "load_flashrag_selected_examples", fake_load)
+
+    loaded = _load_eval_examples(
+        {"data": {"total_val_examples": 1000, "datasets": ["hotpotqa"]}},
+        split="dev",
+        max_examples=None,
+        verbose=True,
+    )
+
+    assert loaded == []
+    assert calls["total_examples"] is None
+    assert calls["verbose"] is True
 
 
 def test_eval_uses_accuracy_for_options_and_f1_for_qa():

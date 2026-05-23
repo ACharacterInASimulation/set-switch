@@ -68,3 +68,10 @@ def test_validate_config_rejects_string_booleans():
 
     with pytest.raises(ValueError, match="YAML boolean"):
         validate_config(cfg)
+
+
+def test_validate_config_accepts_eval_all_examples():
+    cfg = _cfg("setswitch")
+    cfg["eval"]["max_examples"] = "all"
+
+    validate_config(cfg)
